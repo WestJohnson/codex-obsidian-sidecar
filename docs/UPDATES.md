@@ -8,6 +8,15 @@ Update checks are read-only and may run once per day when enabled:
 obsidian-sidecar update-check
 ```
 
+Before the package is published, this returns `status: not-published`. Install
+an offline production candidate only from its verified release directory:
+
+```sh
+cd release
+shasum -a 256 -c SHA256SUMS
+uv tool install --force ./artifacts/codex_obsidian_sidecar-VERSION-py3-none-any.whl
+```
+
 An update is never applied automatically. After reviewing the current and
 target versions:
 
@@ -36,14 +45,17 @@ credentials.
 
 ## Maintainer Flow
 
-1. Update `pyproject.toml`, `src/obsidian_sidecar/__init__.py`, and
+1. Work from a Git checkout with a configured `origin`, a clean tree, and a
+   protected default branch; do not tag an extracted release bundle.
+2. Update `pyproject.toml`, `src/obsidian_sidecar/__init__.py`, and
    `CHANGELOG.md` to the same version.
-2. Run `python scripts/export_release.py`.
-3. Verify every generated artifact with `SHA256SUMS`.
-4. Push a signed `vX.Y.Z` tag after review.
-5. Confirm deterministic tests, clean-install tests, attestations, GitHub
+3. Run `python scripts/export_release.py`.
+4. Verify every generated artifact with `SHA256SUMS`.
+5. Push a signed `vX.Y.Z` tag after review. CI rejects a tag that does not
+   match the package version.
+6. Confirm deterministic tests, clean-install tests, attestations, GitHub
    Release assets, and PyPI publication.
-6. Install the public release on a clean machine and run the live benchmark.
+7. Install the public release on a clean machine and run the live benchmark.
 
 The release workflow requires one external setup step: configure the PyPI
 project's Trusted Publisher to match the GitHub repository, workflow filename,

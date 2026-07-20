@@ -259,6 +259,7 @@ def validate_cloud_backup(
     *,
     now: datetime | None = None,
     maximum_age: timedelta = timedelta(hours=48),
+    require_current_match: bool = True,
 ) -> tuple[bool, str]:
     checked_at = now or datetime.now(UTC)
     try:
@@ -311,6 +312,13 @@ def validate_cloud_backup(
                 if len(payload) != int(entry["size"]) or digest != entry["sha256"]:
                     raise ValueError(f"backup checksum mismatch: {relative}")
                 archived[relative] = digest
+
+            if not require_current_match:
+                return (
+                    True,
+                    f"{backup.name}: restored and checksum-verified "
+                    f"{len(archived)} files; recovery-point age {age}",
+                )
 
             current_durable: dict[str, str] = {}
             for path in sorted(vault.rglob("*")):
@@ -1056,7 +1064,10 @@ def run_cloud_benchmark(
         backups = sorted(settings.cloud_backup_dir.glob("obsidian-vault-*.tar.gz"))
         if backups:
             backup_ok, backup_detail = validate_cloud_backup(
-                backups[-1], settings.vault_path, now=checked_at
+                backups[-1],
+                settings.vault_path,
+                now=checked_at,
+                require_current_match=False,
             )
         else:
             backup_detail = "no backup archive"

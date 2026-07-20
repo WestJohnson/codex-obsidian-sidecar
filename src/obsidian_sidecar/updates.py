@@ -7,6 +7,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -53,7 +54,25 @@ def check_update(
     current_version: str = __version__,
     fetcher: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    value = (fetcher or _fetch_json)(index_url)
+    try:
+        value = (fetcher or _fetch_json)(index_url)
+    except HTTPError as error:
+        if error.code != 404:
+            raise
+        current = Version(current_version)
+        return {
+            "schema": 1,
+            "checked_at": datetime.now(UTC).isoformat(),
+            "package": PACKAGE_NAME,
+            "source": index_url,
+            "current_version": str(current),
+            "latest_version": None,
+            "update_available": False,
+            "release_hashes": [],
+            "install_method": "offline-wheel-until-published",
+            "automatic_apply": False,
+            "status": "not-published",
+        }
     info = value.get("info")
     if not isinstance(info, dict) or not isinstance(info.get("version"), str):
         raise ValueError("Update metadata does not contain info.version")
@@ -93,6 +112,8 @@ def apply_update(
     executable: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
+    if update.get("status") == "not-published":
+        return update
     if not update.get("update_available"):
         return {**update, "status": "current"}
     latest = str(update.get("latest_version", ""))

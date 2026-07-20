@@ -10,8 +10,9 @@ only while both replicas are connected; offline output is staged on the VPS.
 
 Syncthing 2.1.2 synchronizes that directory with
 `~/Documents/Obsidian Vault` on the Mac. Both folders are Send & Receive. The
-Mac initiates a direct TLS 1.3 connection to `memory-vps:22000`; the Syncthing
-GUI and REST API remain on `127.0.0.1:8384` on each machine.
+Mac initiates a direct TLS 1.3 connection to the configured cloud host on port
+22000; the Syncthing GUI and REST API remain on `127.0.0.1:8384` on each
+machine.
 
 Self-hosted LiveSync/CouchDB was not selected. It is useful for synchronizing
 Obsidian clients, but its headless filesystem client is still emerging. The VPS
@@ -20,7 +21,7 @@ and bounded model evidence.
 
 ## Runtime Map
 
-| Component | Mac | memory-vps |
+| Component | Mac | Cloud VPS |
 | --- | --- | --- |
 | Vault | `~/Documents/Obsidian Vault` | `/srv/obsidian-vault` |
 | Syncthing state | `~/Library/Application Support/Syncthing` | `/var/lib/obsidian-sync/.local/state/syncthing` |
@@ -56,6 +57,11 @@ configuration, logs, or model packet.
   archive, its members must exactly match a SHA-256 manifest, and the candidate
   must restore and validate before publication or rotation. The newest 30 are
   retained.
+- Backup creation requires an exact match to the then-current durable vault.
+  Recurring acceptance restores and checksum-verifies the newest recovery point
+  and requires it to be no more than 48 hours old; later daytime work is
+  protected by Syncthing and independent Git checkpoints until the next nightly
+  archive.
 - An OS-level process lock serializes timer and manual runs on the VPS.
 - A shared cloud lease pauses the local sidecar. A shared local-writer lease
   blocks cloud maintenance. The cloud worker rechecks writers and conflicts
@@ -167,11 +173,13 @@ brew services list | grep syncthing
 VPS:
 
 ```sh
-ssh memory-vps 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-doctor'
-ssh memory-vps 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
-ssh memory-vps 'systemctl list-timers obsidian-cloud-maintenance.timer --no-pager'
-ssh memory-vps 'systemctl list-timers obsidian-cloud-reconnect.timer --no-pager'
-ssh memory-vps 'journalctl -u obsidian-cloud-maintenance.service -n 100 --no-pager'
+SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
+SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host "$SIDECAR_CONFIG_PATH")"
+ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-doctor'
+ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
+ssh "$SIDECAR_CLOUD_HOST" 'systemctl list-timers obsidian-cloud-maintenance.timer --no-pager'
+ssh "$SIDECAR_CLOUD_HOST" 'systemctl list-timers obsidian-cloud-reconnect.timer --no-pager'
+ssh "$SIDECAR_CLOUD_HOST" 'journalctl -u obsidian-cloud-maintenance.service -n 100 --no-pager'
 ```
 
 `cloud-benchmark` is scored out of 100. Passing requires at least 80 points and
@@ -185,9 +193,9 @@ leave `/var/lib/obsidian-cloud/maintenance.failed` until successful completion.
 The success handler removes the marker and resets the retry counter so
 operator-triggered healthy runs do not exhaust the failure budget.
 
-The Mac launchd worker probes `alert-status` over the configured `memory-vps`
-SSH alias at most once every 15 minutes. A failed probe is recorded but does
-not notify by itself. Desktop
+The Mac launchd worker probes `alert-status` over the configured
+`cloud_status_ssh_host` at most once every 15 minutes. A failed probe is
+recorded but does not notify by itself. Desktop
 notifications are reserved for failed queue entries, sync conflicts, a cloud
 failure marker, or a staged report older than 24 hours, and identical alerts
 are suppressed for 24 hours.
@@ -202,7 +210,8 @@ Restart only the affected daemon:
 
 ```sh
 brew services restart syncthing
-ssh memory-vps 'systemctl restart syncthing@obsidian-sync.service'
+SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host ~/.config/codex-obsidian-sidecar/config.json)"
+ssh "$SIDECAR_CLOUD_HOST" 'systemctl restart syncthing@obsidian-sync.service'
 ```
 
 ### Conflict File Exists
@@ -218,10 +227,11 @@ Stop the timer and Syncthing before changing the live vault. Extract into a
 temporary directory first and inspect it:
 
 ```sh
-ssh memory-vps 'systemctl stop obsidian-cloud-maintenance.timer'
-ssh memory-vps 'systemctl stop syncthing@obsidian-sync.service'
-ssh memory-vps 'mkdir -p /tmp/obsidian-restore-review'
-ssh memory-vps 'tar -xzf /var/backups/obsidian-vault/obsidian-vault-YYYYMMDDTHHMMSSZ.tar.gz -C /tmp/obsidian-restore-review'
+SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host ~/.config/codex-obsidian-sidecar/config.json)"
+ssh "$SIDECAR_CLOUD_HOST" 'systemctl stop obsidian-cloud-maintenance.timer'
+ssh "$SIDECAR_CLOUD_HOST" 'systemctl stop syncthing@obsidian-sync.service'
+ssh "$SIDECAR_CLOUD_HOST" 'mkdir -p /tmp/obsidian-restore-review'
+ssh "$SIDECAR_CLOUD_HOST" 'tar -xzf /var/backups/obsidian-vault/obsidian-vault-YYYYMMDDTHHMMSSZ.tar.gz -C /tmp/obsidian-restore-review'
 ```
 
 Restore only after comparing the archive with `/srv/obsidian-vault`. The server
@@ -236,14 +246,25 @@ Run local tests first, then deploy and verify:
 cd ~/Documents/codex-obsidian-sidecar
 .venv/bin/pytest -q
 uvx ruff check src tests
-rsync -az --exclude .venv --exclude .pytest_cache --exclude .ruff_cache --exclude __pycache__ ./ memory-vps:/opt/obsidian-cloud/app/
-ssh memory-vps '/opt/obsidian-cloud/venv/bin/pip install --force-reinstall --no-deps /opt/obsidian-cloud/app'
-ssh memory-vps 'cd /opt/obsidian-cloud/app && /opt/obsidian-cloud/venv/bin/pytest -q'
+python scripts/export_release.py
+cd release
+shasum -a 256 -c SHA256SUMS
+cd ..
+SIDECAR_VERSION=X.Y.Z
+SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host ~/.config/codex-obsidian-sidecar/config.json)"
+rsync -az --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff_cache --exclude __pycache__ ./ "$SIDECAR_CLOUD_HOST":/opt/obsidian-cloud/app/
+ssh "$SIDECAR_CLOUD_HOST" 'install -d -o root -g root -m 0755 /opt/obsidian-cloud/releases'
+rsync -az "release/artifacts/codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl" "$SIDECAR_CLOUD_HOST":/opt/obsidian-cloud/releases/
+ssh "$SIDECAR_CLOUD_HOST" "/opt/obsidian-cloud/venv/bin/pip install --force-reinstall --no-deps /opt/obsidian-cloud/releases/codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
+ssh "$SIDECAR_CLOUD_HOST" 'cd /opt/obsidian-cloud/app && /opt/obsidian-cloud/venv/bin/pytest -q'
 ```
 
 After a runtime or systemd change, run one manual maintenance cycle followed by
-`cloud-benchmark`. Syncthing itself is installed from Homebrew on the Mac and
-the official Syncthing stable-v2 apt repository on Ubuntu.
+`cloud-benchmark`. Preserve the previous app tree and installed package as a
+timestamped archive before deployment, and keep the exact prior wheel under
+`/opt/obsidian-cloud/releases` as the rollback input. Syncthing itself is
+installed from Homebrew on the Mac and the official Syncthing stable-v2 apt
+repository on Ubuntu.
 
 Maintenance and reconnect failures have independent markers under
 `/var/lib/obsidian-cloud`. Each marker is cleared only by a successful run of

@@ -15,7 +15,14 @@ from .maintenance import (
     reindex_basic_memory,
     write_health_report,
 )
-from .queueing import load_event, move_event, ready_groups, save_event, utc_now
+from .queueing import (
+    has_usable_transcript_path,
+    load_event,
+    move_event,
+    ready_groups,
+    save_event,
+    utc_now,
+)
 from .security import redact_text
 from .transcript import build_curation_packet
 from .validation import validate_curation
@@ -118,8 +125,17 @@ def process_ready(
                 if settings.runtime_role == "local" and lease_active:
                     summary.deferred_reason = f"cloud-maintenance-{lease_reason}"
                     break
-                latest = paths[-1]
-                event = load_event(latest)
+                event = None
+                for candidate in reversed(paths):
+                    candidate_event = load_event(candidate)
+                    if has_usable_transcript_path(candidate_event):
+                        event = candidate_event
+                        break
+                if event is None:
+                    summary.skipped += 1
+                    _mark_group(paths, settings, "processed")
+                    summary.processed_events += len(paths)
+                    continue
                 try:
                     packet = build_curation_packet(event)
                     curation = active_curator.curate(packet)

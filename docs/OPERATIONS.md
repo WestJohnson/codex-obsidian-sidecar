@@ -5,8 +5,8 @@
 1. Codex runs the trusted global `Stop` hook from `~/.codex/hooks.json`.
 2. The hook writes only event metadata to
    `~/.local/share/codex-obsidian-sidecar/queue/` and always exits zero.
-3. `io.github.codex-obsidian-sidecar` runs once per minute through
-   launchd and waits for the configured debounce window.
+3. The configured `service_label` runs once per minute through launchd and
+   waits for the configured debounce window.
 4. The worker reads user messages and final answers from the Codex transcript,
    adds bounded Git metadata, redacts likely credentials, and invokes Luna in
    a read-only ephemeral Codex process.
@@ -16,7 +16,7 @@
    Obsidian CLI, Basic Memory, and Git backup health.
    A dirty vault also receives a lightweight Git checkpoint at most once per
    hour without running the full daily maintenance pass.
-7. Optional Syncthing keeps a headless replica at `memory-vps:/srv/obsidian-vault`.
+7. Optional Syncthing keeps a headless replica on the configured cloud host.
 8. The VPS runs fenced maintenance nightly at 03:30 HST and calls Luna only
    when source-note hashes changed or a trusted cloud task is pending.
 9. If the Mac is disconnected, the VPS creates a validated backup and stages
@@ -34,12 +34,15 @@ payload contents are not copied into the vault.
 ## Routine Checks
 
 ```sh
+SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
+SIDECAR_SERVICE_LABEL="$(jq -r .service_label "$SIDECAR_CONFIG_PATH")"
+SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host "$SIDECAR_CONFIG_PATH")"
 obsidian-sidecar doctor --backup
 obsidian-sidecar benchmark
-launchctl print gui/$(id -u)/io.github.codex-obsidian-sidecar
+launchctl print "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 obsidian-sidecar cloud-doctor
 obsidian-sidecar alert-status
-ssh memory-vps 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
+ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
 ```
 
 Healthy results are:
@@ -50,6 +53,11 @@ Healthy results are:
 - no files in `~/.local/share/codex-obsidian-sidecar/failed/`.
 - cloud benchmark score at least 80 with every critical gate passing.
 - no `/var/lib/obsidian-cloud/maintenance.failed` marker on the VPS.
+
+The cloud backup gate restores and checksum-verifies the newest recovery point
+and enforces a 48-hour maximum age. Backup creation separately requires an
+exact match to the then-current durable vault, so ordinary work after the
+nightly snapshot does not create a false critical failure.
 
 The current reports are stored at:
 
@@ -84,15 +92,20 @@ obsidian-sidecar process --force
 Reload the worker:
 
 ```sh
-launchctl bootout gui/$(id -u)/io.github.codex-obsidian-sidecar
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.codex-obsidian-sidecar.plist
-launchctl kickstart -k gui/$(id -u)/io.github.codex-obsidian-sidecar
+SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
+SIDECAR_SERVICE_LABEL="$(jq -r .service_label "$SIDECAR_CONFIG_PATH")"
+SIDECAR_PLIST_PATH=~/Library/LaunchAgents/"${SIDECAR_SERVICE_LABEL}.plist"
+launchctl bootout "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
+launchctl bootstrap "gui/$(id -u)" "$SIDECAR_PLIST_PATH"
+launchctl kickstart -k "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 ```
 
-Failed events retry three times, then move to the `failed` directory. Invalid
-model output is also written to `_System/Quarantine` without retained secrets.
-Inspect the event's `last_error`, correct the underlying issue, move the event
-back to `queue`, and run `process --force`.
+Hook events without a usable transcript path are skipped before queueing, and
+legacy queued copies are consumed as non-errors. Other failed events retry
+three times, then move to the `failed` directory. Invalid model output is also
+written to `_System/Quarantine` without retained secrets. Inspect the event's
+`last_error`, correct the underlying issue, move the event back to `queue`, and
+run `process --force`.
 
 Cloud maintenance retries a failed run after 15 minutes, with at most three
 starts per hour. A maintenance failure creates

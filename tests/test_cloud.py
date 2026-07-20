@@ -292,6 +292,27 @@ def test_backup_validation_restores_and_matches_current_durable_files(
     assert "does not match current durable files" in detail
 
 
+def test_backup_validation_accepts_intact_recovery_point_after_newer_changes(
+    settings: Settings, tmp_path: Path
+) -> None:
+    note = settings.vault_path / "note.md"
+    note.write_text("backed up", encoding="utf-8")
+    backup = create_cloud_backup(
+        settings.vault_path, tmp_path / "backups", retention=2, now=NOW
+    )
+    note.write_text("newer working copy", encoding="utf-8")
+
+    valid, detail = validate_cloud_backup(
+        backup,
+        settings.vault_path,
+        now=NOW.replace(hour=21),
+        require_current_match=False,
+    )
+
+    assert valid is True
+    assert "recovery-point age" in detail
+
+
 def test_backup_validation_rejects_unmanifested_archive_member(
     settings: Settings, tmp_path: Path
 ) -> None:
@@ -611,12 +632,32 @@ def test_cloud_benchmark_requires_80_and_all_critical_gates(
         service_checker=lambda _property: True,
         now=NOW,
     )
-    assert failed["score"] == 75
+    assert failed["score"] == 85
     assert failed["passed"] is False
-    assert failed["failed_critical"] == [
-        "no-sync-conflicts",
-        "restorable-backup",
-    ]
+    assert failed["failed_critical"] == ["no-sync-conflicts"]
+
+
+def test_cloud_benchmark_accepts_recent_backup_when_vault_has_newer_work(
+    settings: Settings, tmp_path: Path
+) -> None:
+    configured = benchmark_settings(settings, tmp_path)
+    (configured.vault_path / "note.md").write_text(
+        "changed after nightly backup", encoding="utf-8"
+    )
+
+    result = run_cloud_benchmark(
+        configured,
+        client=FakeSync(),
+        service_checker=lambda _property: True,
+        now=NOW.replace(hour=21),
+    )
+
+    backup_case = next(
+        case for case in result["cases"] if case["name"] == "restorable-backup"
+    )
+    assert backup_case["passed"] is True
+    assert result["score"] == 90
+    assert result["passed"] is True
 
 
 def test_cloud_benchmark_rejects_partial_future_backup(

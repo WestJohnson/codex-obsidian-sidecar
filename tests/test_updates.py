@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -38,6 +39,22 @@ def test_update_check_reports_exact_release_and_hash() -> None:
 def test_update_metadata_requires_https() -> None:
     with pytest.raises(ValueError, match="must use HTTPS"):
         updates._fetch_json("http://updates.example.test/release.json")
+
+
+def test_update_check_reports_unpublished_package_without_failing() -> None:
+    def missing(url: str) -> dict:
+        raise HTTPError(url, 404, "Not Found", hdrs=None, fp=None)
+
+    result = updates.check_update(
+        "https://pypi.org/pypi/codex-obsidian-sidecar/json",
+        current_version="0.3.0",
+        fetcher=missing,
+    )
+
+    assert result["status"] == "not-published"
+    assert result["current_version"] == "0.3.0"
+    assert result["update_available"] is False
+    assert result["install_method"] == "offline-wheel-until-published"
 
 
 def test_update_applies_exact_version_and_verifies(

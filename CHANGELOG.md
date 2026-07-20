@@ -2,6 +2,12 @@
 
 ## 0.3.0 - 2026-07-16
 
+- Ignore hook events without transcript files and consume legacy invalid events
+  without creating persistent failed-queue alerts.
+- Validate cloud benchmark backups as intact recovery points within the 48-hour
+  RPO while retaining exact-current validation during backup creation.
+- Report an unpublished PyPI candidate as `not-published` instead of a failed
+  update check.
 - Added machine-readable preflight, dry-run setup, transactional apply, and
   structural installation verification.
 - Added portable macOS launchd and Linux user-systemd setup.

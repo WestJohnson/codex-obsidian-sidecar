@@ -97,6 +97,32 @@ def test_worker_redacts_secrets_from_failure_state(
     assert "[REDACTED_SECRET]" in log
 
 
+def test_worker_consumes_legacy_event_without_transcript_path(
+    settings: Settings, valid_curation: dict
+) -> None:
+    legacy = settings.queue_dir / "legacy-missing-transcript.json"
+    legacy.write_text(
+        json.dumps(
+            {
+                "session_id": "legacy-internal-session",
+                "turn_id": "legacy-turn",
+                "attempts": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = process_ready(
+        settings, force=True, curator=StaticCurator(valid_curation)
+    )
+
+    assert result.skipped == 1
+    assert result.failed == 0
+    assert result.processed_events == 1
+    assert not list(settings.queue_dir.glob("*.json"))
+    assert (settings.processed_dir / legacy.name).exists()
+
+
 def test_worker_defers_while_cloud_maintenance_lease_is_active(
     settings: Settings,
     transcript_path: Path,

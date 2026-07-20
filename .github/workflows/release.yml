@@ -5,6 +5,10 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -39,6 +43,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.13"
+      - name: Verify tag matches package version
+        run: |
+          PACKAGE_VERSION="$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          test "${GITHUB_REF_NAME}" = "v${PACKAGE_VERSION}"
       - run: uv run python scripts/export_release.py --skip-tests
       - uses: actions/attest-build-provenance@v3
         with:

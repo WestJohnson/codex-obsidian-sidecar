@@ -84,7 +84,7 @@ critical gates also pass:
 | Syncthing hardening | 15 | Yes |
 | No sync conflicts | 15 | Yes |
 | Nightly scheduler | 10 | Yes |
-| Restorable backup | 10 | Yes |
+| Restorable recovery point within 48 hours | 10 | Yes |
 | Git checkpoint clean | 10 | No |
 | Recent agent cycle | 10 | No |
 | Coordination clear | 10 | Yes |

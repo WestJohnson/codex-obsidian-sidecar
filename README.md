@@ -93,8 +93,8 @@ obsidian-sidecar alert-status       # actionable alert conditions only
 - Vault: selected during setup
 - Global Codex hook: `~/.codex/hooks.json`
 - Installed runtime: managed by `uv tool`
-- macOS service: `~/Library/LaunchAgents/io.github.codex-obsidian-sidecar.plist`
-- Linux service: `~/.config/systemd/user/io.github.codex-obsidian-sidecar.*`
+- macOS service: `~/Library/LaunchAgents/<configured-service-label>.plist`
+- Linux service: `~/.config/systemd/user/<configured-service-label>.*`
 
 ## Acceptance Standard
 
@@ -116,4 +116,6 @@ cannot masquerade as a working installation.
 
 Version `0.3.0` is a production candidate, not a hosted service. Before a
 public release, configure the repository, GitHub release environment, and PyPI
-Trusted Publisher described in [Updates](docs/UPDATES.md).
+Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
+`update-check` reports `not-published` and exact offline wheel installation is
+the supported update path.

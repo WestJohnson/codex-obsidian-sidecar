@@ -18,6 +18,11 @@ def utc_now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def has_usable_transcript_path(event: dict[str, Any]) -> bool:
+    value = event.get("transcript_path")
+    return isinstance(value, str) and bool(value.strip())
+
+
 def event_key(event: dict[str, Any]) -> str:
     stable = "|".join(
         str(event.get(key) or "")
@@ -43,6 +48,8 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def enqueue_event(settings: Settings, event: dict[str, Any]) -> Path:
+    if not has_usable_transcript_path(event):
+        raise ValueError("Hook event has no transcript_path")
     normalized = {
         "session_id": event.get("session_id"),
         "turn_id": event.get("turn_id"),
@@ -65,6 +72,13 @@ def capture_hook(settings: Settings) -> int:
     try:
         payload = json.load(sys.stdin)
         if isinstance(payload, dict):
+            if not has_usable_transcript_path(payload):
+                settings.log_dir.mkdir(parents=True, exist_ok=True)
+                with (settings.log_dir / "capture-skips.log").open(
+                    "a", encoding="utf-8"
+                ) as handle:
+                    handle.write(f"{utc_now()} missing-transcript-path\n")
+                return 0
             enqueue_event(settings, payload)
     except Exception as exc:  # A memory hook must never block the active Codex turn.
         settings.log_dir.mkdir(parents=True, exist_ok=True)
