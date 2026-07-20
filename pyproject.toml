@@ -27,6 +27,11 @@ dependencies = [
   "PyYAML>=6.0.2,<7",
 ]
 
+[project.urls]
+Homepage = "https://github.com/WestJohnson/codex-obsidian-sidecar"
+Repository = "https://github.com/WestJohnson/codex-obsidian-sidecar"
+Issues = "https://github.com/WestJohnson/codex-obsidian-sidecar/issues"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9",
