@@ -1,0 +1,15 @@
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+release/
+.coverage
+htmlcov/
+
+# Operator-specific deployment state is never part of a public release.
+deploy/private/

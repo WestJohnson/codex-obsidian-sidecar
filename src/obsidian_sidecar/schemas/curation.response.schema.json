@@ -1,0 +1,81 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "skip": { "type": "boolean" },
+    "title": { "type": "string" },
+    "project_name": { "type": "string" },
+    "project_slug": { "type": "string" },
+    "summary": { "type": "string" },
+    "objective": { "type": "string" },
+    "outcome": { "type": "string" },
+    "decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidencedItemWithRationale" }
+    },
+    "changes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "verification": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "unresolved": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "next_actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "topics": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confidence": { "type": "number" }
+  },
+  "required": [
+    "skip",
+    "title",
+    "project_name",
+    "project_slug",
+    "summary",
+    "objective",
+    "outcome",
+    "decisions",
+    "changes",
+    "verification",
+    "unresolved",
+    "next_actions",
+    "topics",
+    "confidence"
+  ],
+  "$defs": {
+    "evidencedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["text", "evidence_ids"]
+    },
+    "evidencedItemWithRationale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "rationale": { "type": "string" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["text", "rationale", "evidence_ids"]
+    }
+  }
+}

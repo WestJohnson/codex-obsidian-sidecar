@@ -1,0 +1,48 @@
+[Unit]
+Description=Fenced Obsidian cloud vault maintenance
+Documentation=file:/opt/obsidian-cloud/app/docs/CLOUD_SYNC.md
+Requires=syncthing@obsidian-sync.service
+After=network-online.target syncthing@obsidian-sync.service
+Wants=network-online.target
+OnFailure=obsidian-cloud-maintenance-failure.service
+OnSuccess=obsidian-cloud-maintenance-success.service
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=obsidian-sync
+Group=obsidian-sync
+WorkingDirectory=/srv/obsidian-vault
+EnvironmentFile=/etc/obsidian-cloud/openrouter.env
+ExecStart=/opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-maintenance
+TimeoutStartSec=20min
+Restart=on-failure
+RestartSec=15min
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/obsidian-vault /var/lib/obsidian-cloud /var/backups/obsidian-vault
+ReadOnlyPaths=/var/lib/obsidian-sync/.local/state/syncthing
+
+[Install]
+WantedBy=multi-user.target

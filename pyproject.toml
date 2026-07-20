@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-obsidian-sidecar"
+version = "0.3.0"
+description = "A validated local and cloud Codex-to-Obsidian memory sidecar"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+keywords = ["codex", "obsidian", "memory", "agent-skill"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+  "jsonschema>=4.23,<5",
+  "packaging>=24.2,<27",
+  "PyYAML>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+]
+
+[project.scripts]
+obsidian-sidecar = "obsidian_sidecar.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/obsidian_sidecar"]
+
+[tool.hatch.build]
+include = [
+  "src/obsidian_sidecar/**/*.py",
+  "src/obsidian_sidecar/fixtures/*.json",
+  "src/obsidian_sidecar/fixtures/*.jsonl",
+  "src/obsidian_sidecar/schemas/*.json",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/.agents",
+  "/.github",
+  "/docs",
+  "/deploy/systemd-cloud",
+  "/scripts",
+  "/src",
+  "/tests",
+  "/AGENTS.md",
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/README.md",
+  "/SECURITY.md",
+  "/config.example.json",
+  "/pyproject.toml",
+  "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "live: uses the installed Codex, Obsidian, or Basic Memory runtime",
+]

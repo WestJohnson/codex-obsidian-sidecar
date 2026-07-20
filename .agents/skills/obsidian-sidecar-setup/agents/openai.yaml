@@ -1,0 +1,4 @@
+interface:
+  display_name: "Obsidian Sidecar Setup"
+  short_description: "Install and verify the memory sidecar"
+  default_prompt: "Use $obsidian-sidecar-setup to install or update the Obsidian memory sidecar on this machine."

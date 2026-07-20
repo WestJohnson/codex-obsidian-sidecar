@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Obsidian cloud vault maintenance
+
+[Timer]
+OnCalendar=*-*-* 13:30:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+Unit=obsidian-cloud-maintenance.service
+
+[Install]
+WantedBy=timers.target

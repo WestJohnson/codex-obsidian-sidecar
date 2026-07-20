@@ -1,0 +1,29 @@
+[Unit]
+Description=Reset the Obsidian maintenance retry counter after success
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -f /var/lib/obsidian-cloud/maintenance.failed
+ExecStart=/usr/bin/systemctl reset-failed obsidian-cloud-maintenance.service
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/obsidian-cloud

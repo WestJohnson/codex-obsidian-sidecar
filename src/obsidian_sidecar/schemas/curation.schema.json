@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "skip": { "type": "boolean" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "project_name": { "type": "string", "minLength": 1, "maxLength": 100 },
+    "project_slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "summary": { "type": "string", "maxLength": 2000 },
+    "objective": { "type": "string", "maxLength": 2000 },
+    "outcome": { "type": "string", "maxLength": 3000 },
+    "decisions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/evidencedItemWithRationale" }
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 30,
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "verification": {
+      "type": "array",
+      "maxItems": 30,
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "unresolved": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "next_actions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/$defs/evidencedItem" }
+    },
+    "topics": {
+      "type": "array",
+      "maxItems": 12,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,49}$" },
+      "uniqueItems": true
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+  },
+  "required": [
+    "skip",
+    "title",
+    "project_name",
+    "project_slug",
+    "summary",
+    "objective",
+    "outcome",
+    "decisions",
+    "changes",
+    "verification",
+    "unresolved",
+    "next_actions",
+    "topics",
+    "confidence"
+  ],
+  "$defs": {
+    "evidencedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "pattern": "^(u|a|g)[0-9]+$" },
+          "uniqueItems": true
+        }
+      },
+      "required": ["text", "evidence_ids"]
+    },
+    "evidencedItemWithRationale": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "rationale": { "type": "string", "maxLength": 1000 },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "pattern": "^(u|a|g)[0-9]+$" },
+          "uniqueItems": true
+        }
+      },
+      "required": ["text", "rationale", "evidence_ids"]
+    }
+  }
+}
