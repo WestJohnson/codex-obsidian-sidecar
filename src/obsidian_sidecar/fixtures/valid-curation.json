@@ -6,7 +6,13 @@
   "summary": "Implemented and verified a responsive landing page while leaving production deployment pending.",
   "objective": "Build a mobile landing page for Rainbow Joes and verify navigation.",
   "outcome": "The landing page and mobile menu were implemented and checked at desktop and mobile sizes.",
-  "decisions": [],
+  "decisions": [
+    {
+      "text": "Use one responsive implementation for desktop and mobile layouts.",
+      "rationale": "A shared implementation keeps navigation behavior consistent.",
+      "evidence_ids": ["a1"]
+    }
+  ],
   "changes": [
     {
       "text": "Implemented the responsive landing page and fixed the mobile menu.",

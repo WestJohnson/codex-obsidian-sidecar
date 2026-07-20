@@ -484,7 +484,7 @@ def run_benchmark(settings: Settings) -> dict:
             assert summary.reindex_result == "ok"
             health = inspect_vault(pipeline_settings)
             assert health.critical_failures == 0
-            assert health.managed_notes == 2
+            assert health.managed_notes == 3
             return (
                 "Capture, curation validation, atomic write, and doctor completed; "
                 "installed indexing and retrieval passed its separate critical case."

@@ -56,6 +56,11 @@ use `$obsidian-sidecar-setup`. See [Installation](docs/INSTALL.md).
 - The curator must cite packet evidence IDs for every substantive item.
 - Newer evidence supersedes stale unresolved findings; contradictions and
   missing local artifact targets are quarantined.
+- Canonical project hubs, decision records, and runbooks carry freshness
+  envelopes whose current state is computed from verification and review dates.
+- Significant high-confidence decisions become deterministic records under
+  `40 Decisions`; impact previews are read-only and never rewrite downstream
+  notes or repository artifacts.
 - Canonical local file links are preserved deterministically.
 - Notes use atomic writes and stable session-derived paths.
 - Low-confidence output goes to `00 Inbox/Needs Review`.
@@ -84,6 +89,9 @@ obsidian-sidecar cloud-doctor       # optional sync and lease health
 obsidian-sidecar cloud-benchmark    # optional deployed cloud score
 obsidian-sidecar cloud-reconcile    # publish a matching offline stage
 obsidian-sidecar alert-status       # actionable alert conditions only
+obsidian-sidecar freshness-status   # computed freshness; no note mutation
+obsidian-sidecar decision-impact ID # read-only decision blast radius
+obsidian-sidecar knowledge-migrate  # read-only migration plan; add --apply
 ```
 
 ## Runtime Paths
@@ -108,13 +116,14 @@ cannot masquerade as a working installation.
 - [Installation](docs/INSTALL.md)
 - [Operations](docs/OPERATIONS.md)
 - [Testing](docs/TESTING.md)
+- [Knowledge State](docs/KNOWLEDGE_STATE.md)
 - [Updates](docs/UPDATES.md)
 - [Optional Cloud Sync](docs/CLOUD_SYNC.md)
 - [Security](SECURITY.md)
 
 ## Status
 
-Version `0.3.0` is a production candidate, not a hosted service. Before a
+Version `0.4.0` is a production candidate, not a hosted service. Before a
 public release, configure the repository, GitHub release environment, and PyPI
 Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
 `update-check` reports `not-published` and exact offline wheel installation is

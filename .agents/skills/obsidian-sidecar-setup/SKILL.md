@@ -50,6 +50,12 @@ For an offline release bundle, verify `SHA256SUMS` first and install the exact
 wheel from that bundle. Re-run `verify-install`, `doctor`, and the deterministic
 test procedure from the install contract after every update.
 
+For version 0.4.0 or later, inspect `obsidian-sidecar knowledge-migrate` after
+installation. The command is read-only by default. Obtain explicit approval
+before adding `--apply`; apply only on the authoritative local vault, then
+verify `freshness-status`, one representative `decision-impact`, Basic Memory
+reindexing, and `doctor` before upgrading a cloud replica.
+
 ## Recovery
 
 On setup failure, inspect the JSON error and generated backups. Correct the

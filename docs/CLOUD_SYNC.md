@@ -101,7 +101,9 @@ Each run:
 2. Acquires and synchronizes the cloud-maintenance lease.
 3. Secret-scans backup candidates, creates an atomic manifested archive, and
    creates a pre-run Git checkpoint.
-4. Runs deterministic vault health and secret checks.
+4. Runs deterministic vault health, freshness, decision, and secret checks.
+   The derived `_System/Knowledge/latest.md` report is excluded from
+   source-change analysis, so it cannot create a feedback loop.
 5. Compares source-note hashes with the last successful run.
 6. Calls `openai/gpt-5.6-luna` only when source notes changed or a task is pending.
 7. Validates model JSON and every referenced evidence path.

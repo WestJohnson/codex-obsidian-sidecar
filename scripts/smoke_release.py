@@ -40,6 +40,7 @@ def smoke(wheel: Path, bundle: Path) -> dict[str, object]:
         required_suffixes = {
             "/AGENTS.md",
             "/.agents/skills/obsidian-sidecar-setup/SKILL.md",
+            "/docs/KNOWLEDGE_STATE.md",
             f"/artifacts/{wheel.name}",
         }
         missing = [

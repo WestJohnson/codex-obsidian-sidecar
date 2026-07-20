@@ -103,6 +103,11 @@ def test_low_confidence_routes_to_review(
     assert "Needs Review" in result.note_path.parts
     metadata, _ = parse_frontmatter(result.note_path.read_text(encoding="utf-8"))
     assert metadata["status"] == "needs-review"
+    project_metadata, _ = parse_frontmatter(
+        result.project_path.read_text(encoding="utf-8")
+    )
+    assert project_metadata["freshness"]["observed_at"].startswith("2026-07-14")
+    assert "verified_at" not in project_metadata["freshness"]
 
 
 def test_confidence_route_change_keeps_one_session_note(

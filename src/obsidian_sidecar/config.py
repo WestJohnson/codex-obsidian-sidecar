@@ -23,6 +23,9 @@ class Settings:
     basic_memory_project: str = "codex-vault"
     auto_git_backup: bool = True
     git_checkpoint_interval_seconds: int = 3_600
+    freshness_project_days: int = 30
+    freshness_decision_days: int = 90
+    freshness_runbook_days: int = 14
     runtime_role: str = "local"
     syncthing_config_path: Path | None = None
     syncthing_url: str = "http://127.0.0.1:8384"
@@ -122,6 +125,9 @@ def load_settings(path: Path | None = None) -> Settings:
         git_checkpoint_interval_seconds=max(
             0, int(raw.get("git_checkpoint_interval_seconds", 3_600))
         ),
+        freshness_project_days=max(1, int(raw.get("freshness_project_days", 30))),
+        freshness_decision_days=max(1, int(raw.get("freshness_decision_days", 90))),
+        freshness_runbook_days=max(1, int(raw.get("freshness_runbook_days", 14))),
         runtime_role=str(raw.get("runtime_role", "local")),
         syncthing_config_path=(
             Path(raw["syncthing_config_path"]).expanduser()

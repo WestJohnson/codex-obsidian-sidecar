@@ -13,7 +13,8 @@
 5. Locally validated output is written atomically to the Obsidian vault and
    indexed by Basic Memory.
 6. Daily maintenance checks structure, links, duplicates, secrets, queues,
-   Obsidian CLI, Basic Memory, and Git backup health.
+   freshness, decision records, Obsidian CLI, Basic Memory, and Git backup
+   health. It also refreshes `_System/Knowledge/latest.md`.
    A dirty vault also receives a lightweight Git checkpoint at most once per
    hour without running the full daily maintenance pass.
 7. Optional Syncthing keeps a headless replica on the configured cloud host.
@@ -63,8 +64,39 @@ The current reports are stored at:
 
 - `Obsidian Vault/_System/Health/latest.md`
 - `Obsidian Vault/_System/Health/benchmark-latest.md`
+- `Obsidian Vault/_System/Knowledge/latest.md`
 - `~/.local/share/codex-obsidian-sidecar/health.json`
 - `~/.local/share/codex-obsidian-sidecar/benchmark-results/latest.json`
+
+## Knowledge State
+
+Inspect current freshness without changing the vault:
+
+```sh
+obsidian-sidecar freshness-status
+obsidian-sidecar freshness-status --path '10 Projects/example/Project.md'
+```
+
+Preview the explicit impact boundary around one decision:
+
+```sh
+obsidian-sidecar decision-impact 'example/use-reviewed-update-path-0123abcd'
+```
+
+Existing managed vaults use a plan-first migration. Apply it only on the
+authoritative local replica; the command acquires the local-writer lease and
+refuses an active cloud lease:
+
+```sh
+obsidian-sidecar knowledge-migrate
+obsidian-sidecar knowledge-migrate --apply
+```
+
+The migration adds metadata to managed project hubs and runbooks, creates
+derived canonical decision records from existing managed session notes, and
+adds managed decision-index blocks to project hubs. It does not rewrite
+historical session bodies or any downstream repository artifact. See
+[Knowledge State](KNOWLEDGE_STATE.md).
 
 ## Trust And Authentication
 

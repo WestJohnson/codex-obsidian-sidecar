@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 - 2026-07-19
+
+- Added computed freshness envelopes for canonical project hubs, decisions,
+  runbooks, and operational instructions, with configurable review windows.
+- Added deterministic canonical project identity reuse for exact source working
+  directories to reduce duplicate project hubs.
+- Added canonical decision records with stable IDs, typed affected targets,
+  source provenance, project indexes, and conservative exact-text reuse.
+- Added read-only `freshness-status` and `decision-impact` commands plus a
+  plan-first `knowledge-migrate` command for existing managed vaults.
+- Added `_System/Knowledge/latest.md` as a human-visible freshness, decision,
+  and project-identity status artifact.
+- Extended health checks to surface missing, invalid, and review-due freshness
+  without rewriting downstream notes or repository artifacts.
+
 ## 0.3.0 - 2026-07-16
 
 - Ignore hook events without transcript files and consume legacy invalid events

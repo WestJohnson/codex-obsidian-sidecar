@@ -28,6 +28,7 @@ class WriteResult:
     project_path: Path
     review_required: bool
     created: bool
+    decision_paths: tuple[Path, ...] = ()
 
 
 def ensure_vault_layout(vault: Path) -> None:
@@ -41,6 +42,7 @@ def ensure_vault_layout(vault: Path) -> None:
         "60 Sessions",
         "90 Archive",
         "_System/Health/history",
+        "_System/Knowledge",
         "_System/Cloud Reports",
         "_System/Cloud Tasks/Pending",
         "_System/Cloud Tasks/Processed",
@@ -119,6 +121,8 @@ def _evidenced_bullets(
 def _render_note(
     curation: dict[str, Any], packet: dict[str, Any], review_required: bool
 ) -> str:
+    from .knowledge import _git_revision
+
     session_id = str(packet.get("session_id") or "unknown")
     captured_at = str(packet.get("captured_at") or datetime.now(UTC).isoformat())
     date = captured_at[:10]
@@ -137,6 +141,9 @@ def _render_note(
         "tags": ["work-session", *curation.get("topics", [])],
         "managed_by": MANAGED_BY,
     }
+    source_revision = _git_revision(packet)
+    if source_revision:
+        metadata["source_revision"] = source_revision
     frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=False).strip()
     project_link = f"[[10 Projects/{project_slug}/Project|{curation['project_name']}]]"
     body = f"""---
@@ -201,6 +208,7 @@ def _project_page(project_name: str, project_slug: str, source_cwd: str) -> str:
             "title": project_name,
             "type": "project",
             "project": project_slug,
+            "canonical_id": f"project:{project_slug}",
             "status": "active",
             "source_cwd": source_cwd,
             "managed_by": MANAGED_BY,
@@ -292,7 +300,22 @@ def write_curation(
     review_required: bool,
 ) -> WriteResult:
     ensure_vault_layout(settings.vault_path)
-    project_slug = _safe_slug(str(curation["project_slug"]))
+    from .knowledge import (
+        resolve_project_identity,
+        update_project_metadata,
+        upsert_decision_records,
+    )
+
+    requested_slug = _safe_slug(str(curation["project_slug"]))
+    project_slug, resolved_name = resolve_project_identity(
+        settings.vault_path,
+        requested_slug,
+        str(packet.get("cwd") or ""),
+    )
+    selected_curation = dict(curation)
+    selected_curation["project_slug"] = project_slug
+    if resolved_name:
+        selected_curation["project_name"] = resolved_name
     session_id = str(packet.get("session_id") or "unknown")
     captured_at = str(packet.get("captured_at") or datetime.now(UTC).isoformat())
     date = captured_at[:10]
@@ -305,7 +328,7 @@ def write_curation(
             settings.vault_path / "60 Sessions" / date[:4] / year_month / filename
         )
     created = not note_path.exists()
-    _atomic_write(note_path, _render_note(curation, packet, review_required))
+    _atomic_write(note_path, _render_note(selected_curation, packet, review_required))
 
     metadata, _ = parse_frontmatter(note_path.read_text(encoding="utf-8"))
     if (
@@ -328,6 +351,23 @@ def write_curation(
             ),
         )
     _update_project_sessions(project_path, settings.vault_path, project_slug)
+    update_project_metadata(
+        settings,
+        selected_curation,
+        packet,
+        session_path=note_path,
+        project_path=project_path,
+        trusted=not review_required,
+    )
+    decision_results: list[dict[str, Any]] = []
+    if not review_required:
+        decision_results = upsert_decision_records(
+            settings,
+            selected_curation,
+            packet,
+            session_path=note_path,
+            project_path=project_path,
+        )
     for affected_project in affected_projects - {project_slug}:
         affected_path = (
             settings.vault_path / "10 Projects" / affected_project / "Project.md"
@@ -336,7 +376,13 @@ def write_curation(
             _update_project_sessions(
                 affected_path, settings.vault_path, affected_project
             )
-    return WriteResult(note_path, project_path, review_required, created)
+    return WriteResult(
+        note_path,
+        project_path,
+        review_required,
+        created,
+        tuple(Path(item["path"]) for item in decision_results),
+    )
 
 
 def write_quarantine(

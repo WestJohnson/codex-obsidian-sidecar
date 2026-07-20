@@ -38,6 +38,12 @@ class VaultHealth:
     orphan_managed_notes: list[str] = field(default_factory=list)
     duplicate_session_ids: dict[str, list[str]] = field(default_factory=dict)
     stale_project_indexes: list[str] = field(default_factory=list)
+    freshness_current: list[str] = field(default_factory=list)
+    freshness_unverified: list[str] = field(default_factory=list)
+    freshness_review_due: list[str] = field(default_factory=list)
+    freshness_unknown: list[str] = field(default_factory=list)
+    freshness_invalid: list[str] = field(default_factory=list)
+    decision_records: int = 0
     possible_secret_files: list[str] = field(default_factory=list)
     queue_pending: int = 0
     queue_failed: int = 0
@@ -51,6 +57,7 @@ class VaultHealth:
             len(self.malformed_frontmatter)
             + len(self.missing_required_fields)
             + len(self.duplicate_session_ids)
+            + len(self.freshness_invalid)
             + len(self.possible_secret_files)
         )
 
@@ -60,6 +67,8 @@ class VaultHealth:
             len(self.unresolved_links)
             + len(self.orphan_managed_notes)
             + len(self.stale_project_indexes)
+            + len(self.freshness_review_due)
+            + len(self.freshness_unknown)
             + self.queue_failed
         )
 
@@ -194,6 +203,20 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
         required = {"title", "type", "managed_by"}
         if metadata.get("type") == "work-session":
             required |= {"project", "date", "session_id", "confidence"}
+        elif metadata.get("type") == "project":
+            required |= {"project", "canonical_id", "freshness"}
+        elif metadata.get("type") == "decision":
+            required |= {
+                "project",
+                "decision_id",
+                "status",
+                "freshness",
+                "affects",
+                "sources",
+            }
+            health.decision_records += 1
+        elif metadata.get("type") in {"runbook", "operational-instruction"}:
+            required.add("freshness")
         missing = sorted(key for key in required if metadata.get(key) in (None, ""))
         if missing:
             health.missing_required_fields[relative] = missing
@@ -249,6 +272,20 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
     }
     health.orphan_managed_notes.sort()
     health.stale_project_indexes = sorted(set(health.stale_project_indexes))
+    from .knowledge import scan_freshness
+
+    for finding in scan_freshness(settings.vault_path):
+        if not finding.managed:
+            continue
+        target = {
+            "current": health.freshness_current,
+            "unverified": health.freshness_unverified,
+            "review-due": health.freshness_review_due,
+            "unknown": health.freshness_unknown,
+            "invalid": health.freshness_invalid,
+        }.get(finding.state)
+        if target is not None:
+            target.append(finding.path)
     health.queue_pending = len(list(settings.queue_dir.glob("*.json")))
     health.queue_failed = len(list(settings.failed_dir.glob("*.json")))
     if settings.runtime_role == "cloud":
@@ -321,6 +358,31 @@ def render_health(health: VaultHealth, *, permalink: str | None = None) -> str:
 - Markdown files: {health.markdown_files}
 - Managed notes: {health.managed_notes}
 - Valid managed notes: {health.valid_managed_notes}
+- Decision records: {health.decision_records}
+
+## Freshness
+
+- Current: {len(health.freshness_current)}
+- Unverified: {len(health.freshness_unverified)}
+- Review due: {len(health.freshness_review_due)}
+- Unknown: {len(health.freshness_unknown)}
+- Invalid: {len(health.freshness_invalid)}
+
+### Review Due
+
+{listing(health.freshness_review_due)}
+
+### Unverified
+
+{listing(health.freshness_unverified)}
+
+### Unknown Or Missing
+
+{listing(health.freshness_unknown)}
+
+### Invalid Envelopes
+
+{listing(health.freshness_invalid)}
 
 ## Malformed Frontmatter
 

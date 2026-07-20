@@ -38,6 +38,7 @@ GENERATED_PREFIXES = (
     "_System/Cloud Tasks/",
     "_System/Coordination/",
     "_System/Health/",
+    "_System/Knowledge/",
 )
 IGNORED_PARTS = {".git", ".obsidian", ".stversions", ".trash"}
 REPLICA_IGNORED_PARTS = {".git", ".stversions", ".trash"}

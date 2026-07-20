@@ -47,8 +47,10 @@ creation, manifested restore checks, backup rotation, postflight timeout and
 conflict handling, strict cloud-agent path grounding, task-inbox completion,
 bounded service retries, failure-marker reporting, reconnect-trigger rate
 limiting, spend-ceiling preflight, curation chronology and contradiction
-checks, canonical artifact preservation, alert deduplication, hourly Git
-checkpoints, cloud transaction idempotency, transactional setup, hook
+checks, canonical artifact preservation, freshness-state calculation,
+canonical project identity reuse, decision-record idempotency, read-only
+blast-radius previews, plan-first knowledge migration, alert deduplication,
+hourly Git checkpoints, cloud transaction idempotency, transactional setup, hook
 preservation, installer idempotency, HTTPS-only update metadata, exact-version
 updates, hook-path migration, and rollback. Pytest's collected count is the
 source of truth as coverage grows.

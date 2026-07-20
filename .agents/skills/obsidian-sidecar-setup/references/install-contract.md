@@ -87,6 +87,12 @@ obsidian-sidecar benchmark
 critical failures. Hook trust remains a deliberate human action in a fresh
 Codex session.
 
+For an existing managed vault upgrading to 0.4.0 or later, run the read-only
+`knowledge-migrate` plan, review its project and decision counts, and apply only
+with explicit approval on the authoritative local replica. A repeated apply
+must report no changed project, decision, or runbook records. Confirm computed
+freshness and a representative read-only decision impact before completion.
+
 ## Platform Boundary
 
 - macOS: launchd integration is supported.

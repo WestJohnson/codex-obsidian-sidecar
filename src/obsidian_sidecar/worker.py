@@ -193,7 +193,10 @@ def _deferred_maintenance(settings: Settings, reason: str) -> dict[str, Any]:
 def _run_maintenance_unfenced(
     settings: Settings, *, backup: bool = True
 ) -> dict[str, Any]:
+    from .knowledge import write_knowledge_report
+
     health = inspect_vault(settings)
+    write_knowledge_report(settings)
     if settings.runtime_role == "cloud":
         reindex_result = "not-required"
         health.basic_memory = "not-required"

@@ -89,6 +89,22 @@ def _parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "alert-status", help="report only actionable memory-sidecar alert conditions"
     )
+    freshness = subparsers.add_parser(
+        "freshness-status", help="report computed freshness without changing notes"
+    )
+    freshness.add_argument("--path", help="filter to one vault-relative Markdown path")
+    impact = subparsers.add_parser(
+        "decision-impact", help="preview a decision's read-only blast radius"
+    )
+    impact.add_argument("decision_id")
+    impact.add_argument("--depth", type=int, choices=(1, 2, 3), default=1)
+    migration = subparsers.add_parser(
+        "knowledge-migrate",
+        help="plan or apply freshness and canonical-decision migration",
+    )
+    migration.add_argument(
+        "--apply", action="store_true", help="apply the otherwise read-only plan"
+    )
     return parser
 
 
@@ -263,6 +279,70 @@ def main(argv: list[str] | None = None) -> int:
 
         print(json.dumps(alert_status(settings), indent=2))
         return 0
+    if args.command == "freshness-status":
+        from .knowledge import knowledge_status
+
+        result = knowledge_status(settings)
+        if args.path:
+            selected = args.path.removeprefix("./")
+            notes = [
+                item
+                for item in result["freshness"]["notes"]
+                if item["path"] == selected
+            ]
+            result["freshness"]["notes"] = notes
+            counts: dict[str, int] = {}
+            for item in notes:
+                counts[item["state"]] = counts.get(item["state"], 0) + 1
+            result["freshness"]["counts"] = counts
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.command == "decision-impact":
+        from .knowledge import preview_decision_impact
+
+        result = preview_decision_impact(settings, args.decision_id, depth=args.depth)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] == "ok" else 1
+    if args.command == "knowledge-migrate":
+        from .coordination import LocalWriterLease, cloud_lease_status
+        from .knowledge import (
+            migrate_knowledge,
+            write_knowledge_report,
+        )
+        from .maintenance import reindex_basic_memory
+
+        if not args.apply:
+            print(json.dumps(migrate_knowledge(settings, apply=False), indent=2))
+            return 0
+        if settings.runtime_role != "local":
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "detail": "knowledge migration may mutate only the authoritative local vault",
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+        active, reason, _ = cloud_lease_status(settings.vault_path)
+        if active:
+            print(
+                json.dumps(
+                    {
+                        "status": "deferred",
+                        "detail": f"cloud maintenance lease is {reason}",
+                    },
+                    indent=2,
+                )
+            )
+            return 1
+        with LocalWriterLease(settings.vault_path, ttl_seconds=1_800):
+            result = migrate_knowledge(settings, apply=True)
+            write_knowledge_report(settings)
+        result["reindex_result"] = reindex_basic_memory(settings)
+        print(json.dumps(result, indent=2))
+        return 0 if not result["errors"] and result["reindex_result"] == "ok" else 1
     return 2
 
 

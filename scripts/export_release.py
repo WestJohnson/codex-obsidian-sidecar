@@ -24,6 +24,7 @@ AGENT_FILES = (
     Path("CHANGELOG.md"),
     Path("config.example.json"),
     Path("docs/INSTALL.md"),
+    Path("docs/KNOWLEDGE_STATE.md"),
     Path("docs/UPDATES.md"),
 )
 SECRET_PATTERNS = (

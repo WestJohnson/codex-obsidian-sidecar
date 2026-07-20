@@ -26,8 +26,8 @@ def test_clean_managed_vault_has_no_content_failures(
 ) -> None:
     write_curation(settings, valid_curation, packet(tmp_path), review_required=False)
     health = inspect_vault(settings)
-    assert health.managed_notes == 2
-    assert health.valid_managed_notes == 2
+    assert health.managed_notes == 3
+    assert health.valid_managed_notes == 3
     assert not health.malformed_frontmatter
     assert not health.missing_required_fields
     assert not health.unresolved_links
