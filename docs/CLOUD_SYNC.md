@@ -183,7 +183,8 @@ ssh "$SIDECAR_CLOUD_HOST" 'journalctl -u obsidian-cloud-maintenance.service -n 1
 ```
 
 `cloud-benchmark` is scored out of 100. Passing requires at least 80 points and
-every critical gate. The current deployment scores 100.
+every critical gate; record each deployment's live result instead of treating a
+historical score in this runbook as current evidence.
 
 When a peer is disconnected, `cloud-doctor` intentionally exits nonzero and
 reports `offline_read_safe: true` only when the local replica is complete and

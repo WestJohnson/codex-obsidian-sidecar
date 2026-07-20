@@ -50,8 +50,8 @@ limiting, spend-ceiling preflight, curation chronology and contradiction
 checks, canonical artifact preservation, alert deduplication, hourly Git
 checkpoints, cloud transaction idempotency, transactional setup, hook
 preservation, installer idempotency, HTTPS-only update metadata, exact-version
-updates, hook-path migration, and rollback. The current deterministic suite
-contains 103 tests.
+updates, hook-path migration, and rollback. Pytest's collected count is the
+source of truth as coverage grows.
 
 ## Release Smoke Test
 
