@@ -80,6 +80,23 @@ This surface is read-only. It never edits a runbook, project note, session,
 decision, or repository artifact. The operator remains responsible for
 approving any downstream update.
 
+## Session Moves And Reference Integrity
+
+The Codex `session_id` is the durable identity even when a later capture changes
+the note's date, confidence route, or project slug. A move writes and verifies
+the new session note first, retargets exact references in Sidecar-managed
+project hubs, decisions, runbooks, and operational instructions, and removes
+the prior note only after no references remain.
+
+The retarget operation changes structured `vault:` values and exact session
+wikilinks only. It does not fuzzy-match text, rewrite unmanaged notes, or merge
+project identities. If an unmanaged note still links to the prior path, the
+move stops with both session notes retained for operator review.
+
+Freshness inspection also resolves local `vault:` evidence sources. A missing
+`source` or `verified_source` makes the envelope invalid and therefore a
+critical health finding.
+
 ## Existing Vault Migration
 
 First inspect the plan:

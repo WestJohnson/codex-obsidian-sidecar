@@ -1,6 +1,8 @@
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
+
 from obsidian_sidecar.config import Settings
 from obsidian_sidecar.vault import (
     parse_frontmatter,
@@ -10,12 +12,17 @@ from obsidian_sidecar.vault import (
 )
 
 
-def packet(tmp_path: Path) -> dict:
+def packet(
+    tmp_path: Path,
+    *,
+    captured_at: str = "2026-07-14T08:01:00Z",
+    cwd: Path | None = None,
+) -> dict:
     return {
         "session_id": "fixture-session-001",
         "turn_id": "turn-1",
-        "cwd": str(tmp_path / "rainbow-joes"),
-        "captured_at": "2026-07-14T08:01:00Z",
+        "cwd": str(cwd or tmp_path / "rainbow-joes"),
+        "captured_at": captured_at,
     }
 
 
@@ -80,6 +87,133 @@ def test_same_session_updates_without_duplicate(
     assert "Updated summary" in first.note_path.read_text(encoding="utf-8")
 
 
+def test_same_session_move_retargets_canonical_references(
+    settings: Settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "Documents"
+    workspace.mkdir()
+    first = write_curation(
+        settings,
+        valid_curation,
+        packet(
+            tmp_path,
+            captured_at="2026-07-20T23:55:00+00:00",
+            cwd=workspace,
+        ),
+        review_required=False,
+    )
+    old_path = first.note_path
+    old_relative = old_path.relative_to(settings.vault_path)
+    old_source = f"vault:{old_relative.as_posix()}"
+    old_decision = first.decision_paths[0]
+    old_project = first.project_path
+
+    changed = deepcopy(valid_curation)
+    changed["project_name"] = "Rainbow Site"
+    changed["project_slug"] = "rainbow-site"
+    changed["title"] = "Rainbow Site follow-up"
+    changed["decisions"] = [
+        {
+            "text": "Keep the follow-up under the new project identity.",
+            "rationale": "The later capture uses the reviewed project name.",
+            "evidence_ids": ["a1"],
+        }
+    ]
+    second = write_curation(
+        settings,
+        changed,
+        packet(
+            tmp_path,
+            captured_at="2026-07-21T00:05:00+00:00",
+            cwd=workspace,
+        ),
+        review_required=False,
+    )
+    new_relative = second.note_path.relative_to(settings.vault_path)
+    new_source = f"vault:{new_relative.as_posix()}"
+
+    assert second.note_path != old_path
+    assert not old_path.exists()
+    sessions = []
+    for path in settings.vault_path.rglob("*.md"):
+        metadata, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        if metadata.get("type") == "work-session" and (
+            metadata.get("session_id") == "fixture-session-001"
+        ):
+            sessions.append(path)
+    assert sessions == [second.note_path]
+
+    decision_metadata, decision_body = parse_frontmatter(
+        old_decision.read_text(encoding="utf-8")
+    )
+    assert decision_metadata["sources"] == [new_source]
+    assert decision_metadata["freshness"]["source"] == new_source
+    assert decision_metadata["freshness"]["verified_source"] == new_source
+    assert old_source not in old_decision.read_text(encoding="utf-8")
+    assert new_relative.with_suffix("").as_posix() in decision_body
+
+    project_metadata, project_body = parse_frontmatter(
+        old_project.read_text(encoding="utf-8")
+    )
+    assert project_metadata["freshness"]["source"] == new_source
+    assert project_metadata["freshness"]["verified_source"] == new_source
+    assert old_relative.with_suffix("").as_posix() not in project_body
+
+    from obsidian_sidecar.maintenance import inspect_vault
+
+    health = inspect_vault(settings)
+    assert not health.unresolved_links
+    assert not health.duplicate_session_ids
+    assert not health.stale_project_indexes
+    assert not health.freshness_invalid
+
+
+def test_session_move_keeps_old_note_when_unmanaged_reference_blocks_deletion(
+    settings: Settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "Documents"
+    workspace.mkdir()
+    first = write_curation(
+        settings,
+        valid_curation,
+        packet(
+            tmp_path,
+            captured_at="2026-07-20T23:55:00+00:00",
+            cwd=workspace,
+        ),
+        review_required=False,
+    )
+    old_relative = first.note_path.relative_to(settings.vault_path).with_suffix("")
+    manual = settings.vault_path / "30 Knowledge/manual.md"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual_text = f"# Manual\n\n- [[{old_relative.as_posix()}|Original session]]\n"
+    manual.write_text(manual_text, encoding="utf-8")
+
+    changed = deepcopy(valid_curation)
+    changed["project_name"] = "Rainbow Site"
+    changed["project_slug"] = "rainbow-site"
+    with pytest.raises(ValueError, match="remaining references"):
+        write_curation(
+            settings,
+            changed,
+            packet(
+                tmp_path,
+                captured_at="2026-07-21T00:05:00+00:00",
+                cwd=workspace,
+            ),
+            review_required=False,
+        )
+
+    expected_new = list(
+        (settings.vault_path / "60 Sessions/2026/2026-07").glob(
+            "2026-07-21--rainbow-site--*.md"
+        )
+    )
+    assert first.note_path.exists()
+    assert len(expected_new) == 1
+    assert manual.read_text(encoding="utf-8") == manual_text
+
+
 def test_session_write_does_not_delete_syncthing_versions(
     settings: Settings, valid_curation: dict, tmp_path: Path
 ) -> None:
@@ -92,6 +226,29 @@ def test_session_write_does_not_delete_syncthing_versions(
     )
     write_curation(settings, valid_curation, packet(tmp_path), review_required=False)
     assert archived.exists()
+
+
+def test_session_cleanup_ignores_managed_non_session_notes(
+    settings: Settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    sentinel = settings.vault_path / "30 Knowledge/sentinel.md"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(
+        """---
+title: Sentinel
+type: knowledge
+managed_by: codex-obsidian-sidecar
+session_id: fixture-session-001
+---
+
+# Sentinel
+""",
+        encoding="utf-8",
+    )
+
+    write_curation(settings, valid_curation, packet(tmp_path), review_required=False)
+
+    assert sentinel.exists()
 
 
 def test_low_confidence_routes_to_review(

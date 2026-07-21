@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 - 2026-07-20
+
+- Made same-session note moves reference-safe across date, confidence-route,
+  and project-slug changes by retargeting exact managed references before the
+  prior note is removed.
+- Added fail-safe move validation: unmanaged references block removal and leave
+  both session copies recoverable for operator review.
+- Restricted duplicate cleanup to managed work-session notes and added
+  read-back verification for canonical reference repairs.
+- Made missing local `vault:` freshness and verification sources critical
+  health findings instead of silently treating their envelopes as current.
+
 ## 0.4.0 - 2026-07-19
 
 - Added computed freshness envelopes for canonical project hubs, decisions,

@@ -20,6 +20,9 @@ MANAGED_BY = "codex-obsidian-sidecar"
 IGNORED_VAULT_PARTS = frozenset({".git", ".obsidian", ".stversions", ".trash"})
 SESSION_BLOCK_START = "<!-- SIDECAR:SESSIONS:START -->"
 SESSION_BLOCK_END = "<!-- SIDECAR:SESSIONS:END -->"
+CANONICAL_REFERENCE_TYPES = frozenset(
+    {"project", "decision", "runbook", "operational-instruction"}
+)
 
 
 @dataclass(frozen=True)
@@ -270,10 +273,10 @@ def _update_project_sessions(
     _atomic_write(project_path, text)
 
 
-def _remove_duplicate_session_notes(
+def _duplicate_session_notes(
     vault: Path, target: Path, session_id: str
-) -> set[str]:
-    affected_projects: set[str] = set()
+) -> list[tuple[Path, str]]:
+    duplicates: list[tuple[Path, str]] = []
     for path in vault.rglob("*.md"):
         if path == target or IGNORED_VAULT_PARTS.intersection(path.parts):
             continue
@@ -283,13 +286,152 @@ def _remove_duplicate_session_notes(
             continue
         if metadata.get("managed_by") != MANAGED_BY:
             continue
+        if metadata.get("type") != "work-session":
+            continue
         if str(metadata.get("session_id") or "") != session_id:
             continue
         project = str(metadata.get("project") or "").strip()
-        if project:
-            affected_projects.add(project)
-        path.unlink()
-    return affected_projects
+        duplicates.append((path, project))
+    return sorted(duplicates, key=lambda item: str(item[0]))
+
+
+def _replace_exact_reference(value: Any, replacements: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return replacements.get(value, value)
+    if isinstance(value, list):
+        return [_replace_exact_reference(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_exact_reference(item, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _retarget_session_wikilinks(
+    body: str, old_relative: Path, new_relative: Path
+) -> str:
+    updated = body
+    targets = (
+        (
+            old_relative.with_suffix("").as_posix(),
+            new_relative.with_suffix("").as_posix(),
+        ),
+        (old_relative.as_posix(), new_relative.as_posix()),
+    )
+    for old_target, new_target in targets:
+        pattern = re.compile(
+            r"\[\["
+            + re.escape(old_target)
+            + r"(?P<heading>#[^|\]]+)?(?P<alias>\|[^\]]+)?\]\]"
+        )
+
+        def replacement(match: re.Match[str]) -> str:
+            heading = match.group("heading") or ""
+            alias = match.group("alias") or ""
+            if alias == f"|{old_relative.stem}":
+                alias = f"|{new_relative.stem}"
+            return f"[[{new_target}{heading}{alias}]]"
+
+        updated = pattern.sub(replacement, updated)
+    return updated
+
+
+def _contains_exact_reference(value: Any, references: set[str]) -> bool:
+    if isinstance(value, str):
+        return value in references
+    if isinstance(value, list):
+        return any(_contains_exact_reference(item, references) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_exact_reference(item, references) for item in value.values()
+        )
+    return False
+
+
+def retarget_managed_session_references(
+    vault: Path, old_path: Path, new_path: Path
+) -> list[Path]:
+    """Retarget exact canonical references for a controlled session-note move."""
+    if not new_path.exists():
+        raise ValueError(f"session move target does not exist: {new_path.name}")
+    old_relative = old_path.relative_to(vault)
+    new_relative = new_path.relative_to(vault)
+    replacements = {
+        f"vault:{old_relative.as_posix()}": f"vault:{new_relative.as_posix()}",
+        f"vault:{old_relative.with_suffix('').as_posix()}": (
+            f"vault:{new_relative.with_suffix('').as_posix()}"
+        ),
+    }
+    changed: list[Path] = []
+    for path in sorted(vault.rglob("*.md")):
+        if IGNORED_VAULT_PARTS.intersection(path.parts):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            metadata, body = parse_frontmatter(text)
+        except (ValueError, yaml.YAMLError):
+            continue
+        if metadata.get("managed_by") != MANAGED_BY:
+            continue
+        if metadata.get("type") not in CANONICAL_REFERENCE_TYPES:
+            continue
+        updated_metadata = _replace_exact_reference(metadata, replacements)
+        updated_body = _retarget_session_wikilinks(body, old_relative, new_relative)
+        if updated_metadata == metadata and updated_body == body:
+            continue
+        frontmatter = yaml.safe_dump(
+            updated_metadata, sort_keys=False, allow_unicode=False
+        ).strip()
+        content = f"---\n{frontmatter}\n---\n{updated_body}"
+        if contains_secret(content):
+            raise ValueError(
+                f"retargeted session reference contains an apparent secret: {path.name}"
+            )
+        _atomic_write(path, content)
+        verified_metadata, verified_body = parse_frontmatter(
+            path.read_text(encoding="utf-8")
+        )
+        if _contains_exact_reference(verified_metadata, set(replacements)):
+            raise ValueError(f"session reference read-back failed: {path.name}")
+        if verified_body != _retarget_session_wikilinks(
+            verified_body, old_relative, new_relative
+        ):
+            raise ValueError(f"session wikilink read-back failed: {path.name}")
+        changed.append(path)
+    return changed
+
+
+def session_reference_paths(
+    vault: Path, session_path: Path, *, exclude: set[Path] | None = None
+) -> list[Path]:
+    """Return notes that still contain a structured or wiki session reference."""
+    ignored = exclude or set()
+    relative = session_path.relative_to(vault)
+    structured = {
+        f"vault:{relative.as_posix()}",
+        f"vault:{relative.with_suffix('').as_posix()}",
+    }
+    remaining: list[Path] = []
+    for path in sorted(vault.rglob("*.md")):
+        if path in ignored or IGNORED_VAULT_PARTS.intersection(path.parts):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            metadata, body = parse_frontmatter(text)
+        except (ValueError, yaml.YAMLError):
+            metadata, body = {}, text
+        has_structured = (
+            metadata.get("managed_by") == MANAGED_BY
+            and metadata.get("type") in CANONICAL_REFERENCE_TYPES
+            and _contains_exact_reference(metadata, structured)
+        )
+        has_wikilink = body != _retarget_session_wikilinks(
+            body, relative, Path("__retarget_probe__.md")
+        )
+        if has_structured or has_wikilink:
+            remaining.append(path)
+    return remaining
 
 
 def write_curation(
@@ -328,6 +470,10 @@ def write_curation(
             settings.vault_path / "60 Sessions" / date[:4] / year_month / filename
         )
     created = not note_path.exists()
+    duplicate_sessions = _duplicate_session_notes(
+        settings.vault_path, note_path, session_id
+    )
+    affected_projects = {project for _, project in duplicate_sessions if project}
     _atomic_write(note_path, _render_note(selected_curation, packet, review_required))
 
     metadata, _ = parse_frontmatter(note_path.read_text(encoding="utf-8"))
@@ -336,10 +482,6 @@ def write_curation(
         or metadata.get("managed_by") != MANAGED_BY
     ):
         raise ValueError("note read-back verification failed")
-    affected_projects = _remove_duplicate_session_notes(
-        settings.vault_path, note_path, session_id
-    )
-
     project_path = settings.vault_path / "10 Projects" / project_slug / "Project.md"
     if not project_path.exists():
         _atomic_write(
@@ -350,7 +492,6 @@ def write_curation(
                 str(packet.get("cwd") or ""),
             ),
         )
-    _update_project_sessions(project_path, settings.vault_path, project_slug)
     update_project_metadata(
         settings,
         selected_curation,
@@ -368,6 +509,29 @@ def write_curation(
             session_path=note_path,
             project_path=project_path,
         )
+    duplicate_paths = {path for path, _ in duplicate_sessions}
+    for old_path, _ in duplicate_sessions:
+        retarget_managed_session_references(settings.vault_path, old_path, note_path)
+    blocking_references: dict[str, list[str]] = {}
+    for old_path, _ in duplicate_sessions:
+        remaining = session_reference_paths(
+            settings.vault_path, old_path, exclude=duplicate_paths
+        )
+        if remaining:
+            blocking_references[
+                old_path.relative_to(settings.vault_path).as_posix()
+            ] = [path.relative_to(settings.vault_path).as_posix() for path in remaining]
+    if blocking_references:
+        detail = "; ".join(
+            f"{source}: {', '.join(paths)}"
+            for source, paths in blocking_references.items()
+        )
+        raise ValueError(
+            "refusing to remove a moved session with remaining references: " + detail
+        )
+    for old_path, _ in duplicate_sessions:
+        old_path.unlink()
+    _update_project_sessions(project_path, settings.vault_path, project_slug)
     for affected_project in affected_projects - {project_slug}:
         affected_path = (
             settings.vault_path / "10 Projects" / affected_project / "Project.md"

@@ -123,7 +123,7 @@ cannot masquerade as a working installation.
 
 ## Status
 
-Version `0.4.0` is a production candidate, not a hosted service. Before a
+Version `0.4.1` is a production candidate, not a hosted service. Before a
 public release, configure the repository, GitHub release environment, and PyPI
 Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
 `update-check` reports `not-published` and exact offline wheel installation is

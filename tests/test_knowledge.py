@@ -154,6 +154,8 @@ def test_project_identity_does_not_collapse_generic_workspace(
 
 
 def test_freshness_states_are_computed_not_persisted(settings, tmp_path: Path) -> None:
+    source = settings.vault_path / "session.md"
+    source.write_text("# Source\n", encoding="utf-8")
     path = settings.vault_path / "10 Projects/example/Project.md"
     path.parent.mkdir(parents=True)
     metadata = {
@@ -166,6 +168,7 @@ def test_freshness_states_are_computed_not_persisted(settings, tmp_path: Path) -
             "verified_at": "2026-01-01T00:00:00+00:00",
             "review_after": "2026-01-31T00:00:00+00:00",
             "source": "vault:session.md",
+            "verified_source": "vault:session.md",
         },
     }
     path.write_text(
@@ -283,6 +286,7 @@ managed_by: codex-obsidian-sidecar
 
 def test_health_flags_review_due_freshness(settings) -> None:
     ensure_vault_layout(settings.vault_path)
+    (settings.vault_path / "old.md").write_text("# Old source\n", encoding="utf-8")
     project = settings.vault_path / "10 Projects/stale/Project.md"
     project.parent.mkdir(parents=True)
     project.write_text(
@@ -299,6 +303,7 @@ freshness:
   verified_at: '2020-01-01T00:00:00+00:00'
   review_after: '2020-02-01T00:00:00+00:00'
   source: vault:old.md
+  verified_source: vault:old.md
 ---
 
 # Stale
@@ -310,6 +315,38 @@ freshness:
 
     assert "10 Projects/stale/Project.md" in health.freshness_review_due
     assert health.warnings >= 1
+
+
+def test_missing_vault_freshness_source_is_invalid(settings) -> None:
+    ensure_vault_layout(settings.vault_path)
+    project = settings.vault_path / "10 Projects/missing-source/Project.md"
+    project.parent.mkdir(parents=True)
+    project.write_text(
+        """---
+title: Missing Source
+type: project
+project: missing-source
+canonical_id: project:missing-source
+status: active
+managed_by: codex-obsidian-sidecar
+freshness:
+  class: project
+  observed_at: '2026-07-20T00:00:00+00:00'
+  verified_at: '2026-07-20T00:00:00+00:00'
+  review_after: '2026-08-19T00:00:00+00:00'
+  source: vault:60 Sessions/missing.md
+  verified_source: vault:60 Sessions/missing.md
+---
+
+# Missing Source
+""",
+        encoding="utf-8",
+    )
+
+    health = inspect_vault(settings)
+
+    assert "10 Projects/missing-source/Project.md" in health.freshness_invalid
+    assert health.critical_failures >= 1
 
 
 def test_migration_does_not_refresh_empty_project_from_its_own_write(settings) -> None:

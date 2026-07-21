@@ -234,6 +234,7 @@ def assess_freshness(
     verified = _parse_datetime(envelope.get("verified_at"))
     review_after = _parse_datetime(envelope.get("review_after"))
     source = str(envelope.get("source") or "") or None
+    verified_source = str(envelope.get("verified_source") or "") or None
     revision = str(envelope.get("source_revision") or "") or None
     invalid: list[str] = []
     if freshness_class not in FRESHNESS_CLASSES:
@@ -242,6 +243,18 @@ def assess_freshness(
         invalid.append("observed_at is missing or invalid")
     if freshness_class != "durable" and review_after is None:
         invalid.append("review_after is missing or invalid")
+    if source is None:
+        invalid.append("source is missing")
+    elif source.startswith("vault:") and not _vault_reference_exists(vault, source):
+        invalid.append("source does not resolve")
+    if verified is not None and verified_source is None:
+        invalid.append("verified_source is missing")
+    elif (
+        verified_source
+        and verified_source.startswith("vault:")
+        and not (_vault_reference_exists(vault, verified_source))
+    ):
+        invalid.append("verified_source does not resolve")
     if invalid:
         state = "invalid"
         detail = "; ".join(invalid)
@@ -271,6 +284,20 @@ def assess_freshness(
         managed,
         detail,
     )
+
+
+def _vault_reference_exists(vault: Path, reference: str) -> bool:
+    relative = reference.removeprefix("vault:").strip()
+    if not relative:
+        return False
+    candidate = vault / relative
+    if not candidate.suffix:
+        candidate = candidate.with_suffix(".md")
+    try:
+        candidate.resolve(strict=False).relative_to(vault.resolve(strict=False))
+    except ValueError:
+        return False
+    return candidate.exists()
 
 
 def scan_freshness(

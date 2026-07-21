@@ -49,7 +49,8 @@ bounded service retries, failure-marker reporting, reconnect-trigger rate
 limiting, spend-ceiling preflight, curation chronology and contradiction
 checks, canonical artifact preservation, freshness-state calculation,
 canonical project identity reuse, decision-record idempotency, read-only
-blast-radius previews, plan-first knowledge migration, alert deduplication,
+blast-radius previews, reference-safe same-session moves, missing freshness
+source detection, plan-first knowledge migration, alert deduplication,
 hourly Git checkpoints, cloud transaction idempotency, transactional setup, hook
 preservation, installer idempotency, HTTPS-only update metadata, exact-version
 updates, hook-path migration, and rollback. Pytest's collected count is the
