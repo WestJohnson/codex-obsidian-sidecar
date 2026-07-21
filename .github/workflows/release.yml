@@ -59,7 +59,7 @@ jobs:
           release/SHA256SUMS
           release/release-manifest.json
           --generate-notes
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-distributions
           path: |
