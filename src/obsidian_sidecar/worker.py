@@ -6,6 +6,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .checkpoints import (
+    load_checkpoint,
+    save_checkpoint,
+    seed_checkpoint_from_vault,
+)
 from .config import Settings
 from .coordination import LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, Curator
@@ -37,6 +42,8 @@ class ProcessSummary:
     skipped: int = 0
     failed: int = 0
     processed_events: int = 0
+    checkpoint_updates: int = 0
+    checkpoint_chunks_pending: int = 0
     note_paths: list[str] | None = None
     deferred_reason: str | None = None
     reindex_result: str | None = None
@@ -137,7 +144,22 @@ def process_ready(
                     summary.processed_events += len(paths)
                     continue
                 try:
-                    packet = build_curation_packet(event)
+                    session_id = str(event.get("session_id") or "unknown")
+                    checkpoint = load_checkpoint(settings, session_id)
+                    if checkpoint is None and settings.checkpoint_enabled:
+                        transcript_value = str(event.get("transcript_path") or "")
+                        checkpoint = seed_checkpoint_from_vault(
+                            settings,
+                            session_id=session_id,
+                            transcript_path=Path(transcript_value).expanduser(),
+                        )
+                    packet = build_curation_packet(
+                        event,
+                        checkpoint=checkpoint,
+                        checkpoint_max_evidence_chars=(
+                            settings.checkpoint_max_evidence_chars
+                        ),
+                    )
                     curation = active_curator.curate(packet)
                     validation = validate_curation(
                         curation,
@@ -156,9 +178,25 @@ def process_ready(
                             + "; ".join(validation.errors)
                         )
                     if curation.get("skip"):
+                        checkpoint_curation = (
+                            checkpoint.get("curation")
+                            if checkpoint
+                            and isinstance(checkpoint.get("curation"), dict)
+                            else curation
+                        )
+                        if save_checkpoint(
+                            settings,
+                            packet,
+                            checkpoint_curation,
+                            previous=checkpoint,
+                        ):
+                            summary.checkpoint_updates += 1
                         summary.skipped += 1
-                        _mark_group(paths, settings, "processed")
-                        summary.processed_events += len(paths)
+                        if bool((packet.get("checkpoint") or {}).get("has_more")):
+                            summary.checkpoint_chunks_pending += 1
+                        else:
+                            _mark_group(paths, settings, "processed")
+                            summary.processed_events += len(paths)
                         continue
                     result = write_curation(
                         settings,
@@ -166,10 +204,20 @@ def process_ready(
                         packet,
                         review_required=validation.review_required,
                     )
+                    if save_checkpoint(
+                        settings,
+                        packet,
+                        curation,
+                        previous=checkpoint,
+                    ):
+                        summary.checkpoint_updates += 1
                     summary.notes_written += 1
                     summary.note_paths.append(str(result.note_path))
-                    _mark_group(paths, settings, "processed")
-                    summary.processed_events += len(paths)
+                    if bool((packet.get("checkpoint") or {}).get("has_more")):
+                        summary.checkpoint_chunks_pending += 1
+                    else:
+                        _mark_group(paths, settings, "processed")
+                        summary.processed_events += len(paths)
                 except Exception as exc:
                     summary.failed += 1
                     _record_failure(paths, settings, exc)

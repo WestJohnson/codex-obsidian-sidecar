@@ -75,3 +75,8 @@ gate passing.
 
 Existing files receive timestamped backups. Setup is transactional for file
 writes and never overwrites unrelated Codex hooks.
+
+New installations enable incremental checkpoints and numeric curator-usage
+logging by default. Existing configuration files receive the same safe
+defaults during setup; either behavior can be disabled independently with
+`checkpoint_enabled` or `curator_usage_logging`.

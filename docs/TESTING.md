@@ -26,7 +26,7 @@ untrusted hook, unavailable retrieval layer, or failed live curation path.
 | Basic Memory retrieval | 10 | Yes | Lexical and hybrid searches find a fixture. |
 | Installed integration health | 5 | Yes | Stop hook is trusted and launchd is clean. |
 | Live Luna curation | 15 | Yes | Luna returns locally valid grounded output. |
-| Live complete pipeline | 10 | Yes | Capture through write and doctor succeeds. |
+| Live complete pipeline | 10 | Yes | Capture through write, private checkpoint, and doctor succeeds. |
 
 ## Deterministic Suite
 
@@ -51,10 +51,13 @@ checks, canonical artifact preservation, freshness-state calculation,
 canonical project identity reuse, decision-record idempotency, read-only
 blast-radius previews, reference-safe same-session moves, missing freshness
 source detection, plan-first knowledge migration, alert deduplication,
-hourly Git checkpoints, cloud transaction idempotency, transactional setup, hook
-preservation, installer idempotency, HTTPS-only update metadata, exact-version
-updates, hook-path migration, and rollback. Pytest's collected count is the
-source of truth as coverage grows.
+incremental checkpoint creation and seeding, append-only transcript cursors,
+completed-hook cutoffs, bounded delta continuation, failure-safe cursor
+advancement, compact checkpoint evidence, hourly Git checkpoints, cloud
+transaction idempotency, transactional setup, hook preservation, installer
+idempotency, HTTPS-only update metadata, exact-version updates, hook-path
+migration, and rollback. Pytest's collected count is the source of truth as
+coverage grows.
 
 ## Release Smoke Test
 

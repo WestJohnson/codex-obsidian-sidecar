@@ -15,6 +15,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Callable
 
+from .checkpoints import checkpoint_path, load_checkpoint
 from .config import Settings
 from .coordination import LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, StaticCurator
@@ -480,14 +481,29 @@ def run_benchmark(settings: Settings) -> dict:
                 force=True,
                 curator=StaticCurator(curation),
             )
-            assert summary.failed == 0 and summary.notes_written == 1
-            assert summary.reindex_result == "ok"
+            assert summary.failed == 0, asdict(summary)
+            assert summary.notes_written == 1, asdict(summary)
+            assert summary.checkpoint_updates == 1, asdict(summary)
+            assert summary.reindex_result == "ok", asdict(summary)
+            checkpoint = load_checkpoint(
+                pipeline_settings, pipeline_event["session_id"]
+            )
+            assert checkpoint is not None, "pipeline did not persist a checkpoint"
+            assert (
+                checkpoint["cursor"]["byte_offset"]
+                == pipeline_transcript.stat().st_size
+            )
+            stored_checkpoint = checkpoint_path(
+                pipeline_settings, pipeline_event["session_id"]
+            )
+            assert stored_checkpoint.stat().st_mode & 0o777 == 0o600
             health = inspect_vault(pipeline_settings)
-            assert health.critical_failures == 0
-            assert health.managed_notes == 3
+            assert health.critical_failures == 0, asdict(health)
+            assert health.managed_notes >= 2, asdict(health)
             return (
-                "Capture, curation validation, atomic write, and doctor completed; "
-                "installed indexing and retrieval passed its separate critical case."
+                "Capture, curation validation, atomic write, private checkpoint, and "
+                "doctor completed; installed indexing and retrieval passed its "
+                "separate critical case."
             )
 
         record("live-complete-pipeline", 10, True, live_pipeline)

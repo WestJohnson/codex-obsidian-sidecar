@@ -7,11 +7,15 @@
    `~/.local/share/codex-obsidian-sidecar/queue/` and always exits zero.
 3. The configured `service_label` runs once per minute through launchd and
    waits for the configured debounce window.
-4. The worker reads user messages and final answers from the Codex transcript,
-   adds bounded Git metadata, redacts likely credentials, and invokes Luna in
-   a read-only ephemeral Codex process.
+4. The worker loads the session's last validated private checkpoint and reads
+   only newly appended user messages and final answers from the Codex
+   transcript, stopping at the newest completed hook event so an in-progress
+   next turn cannot leak into durable memory. It adds bounded Git metadata,
+   redacts likely credentials, and invokes Luna in a read-only ephemeral Codex
+   process.
 5. Locally validated output is written atomically to the Obsidian vault and
-   indexed by Basic Memory.
+   indexed by Basic Memory. The worker advances the checkpoint cursor only
+   after a validated skip or a successful vault write.
 6. Daily maintenance checks structure, links, duplicates, secrets, queues,
    freshness, decision records, Obsidian CLI, Basic Memory, and Git backup
    health. It also refreshes `_System/Knowledge/latest.md`.
@@ -31,6 +35,28 @@
 
 Raw transcripts, tool output, reasoning, developer instructions, and hook
 payload contents are not copied into the vault.
+
+## Incremental Session Checkpoints
+
+Each long-running Codex session has one versioned checkpoint under
+`~/.local/share/codex-obsidian-sidecar/checkpoints/`. The file contains the
+last validated durable curation, a byte cursor into the append-only transcript,
+and artifact references. It does not contain a raw transcript. Files are
+written atomically with mode `0600` and must pass the same secret boundary as
+vault output.
+
+The next curation packet contains that checkpoint as `c1`, followed by only
+new user/final-answer evidence and current bounded Git facts. A first run on an
+existing session can seed from its latest managed session note. Very large
+deltas are processed in bounded chunks and immediately requeued. Missing,
+stale, or corrupt checkpoints fall back to a bounded recovery packet instead
+of blocking capture.
+
+Numeric token and packet-size telemetry is appended to
+`curator-usage.jsonl`; no prompt or response text is logged. Set
+`"curator_usage_logging": false` to disable it. The reversible feature flag
+`"checkpoint_enabled": false` restores bounded full-window curation without
+deleting checkpoint files.
 
 ## Routine Checks
 
@@ -138,6 +164,12 @@ three times, then move to the `failed` directory. Invalid model output is also
 written to `_System/Quarantine` without retained secrets. Inspect the event's
 `last_error`, correct the underlying issue, move the event back to `queue`, and
 run `process --force`.
+
+A corrupt checkpoint is ignored, recorded without content in
+`checkpoint-errors.jsonl`, and replaced only after the recovery curation is
+validated and written. To isolate checkpoint behavior while investigating,
+set `"checkpoint_enabled": false`, reload the worker, and keep the existing
+checkpoint directory intact for rollback or inspection.
 
 Cloud maintenance retries a failed run after 15 minutes, with at most three
 starts per hour. A maintenance failure creates

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -29,10 +30,14 @@ Quality rules:
 - Set skip=true when there is no durable work worth retaining.
 - Use a stable project slug derived from the working directory or clearly named project.
 - Use lowercase hyphenated topics.
+- Set current_phase to a concise state such as research, implementation, verification, blocked, or complete.
+- Set resume_context to the exact useful point from which a later session should continue.
+- Classify each unresolved item as blocker, scheduled, monitor, accepted, or dropped.
 - Confidence means confidence that the note accurately reflects the supplied evidence.
 - Evidence is chronological in packet order. Newer evidence overrides older findings.
 - Remove resolved items from unresolved and next_actions. Never preserve a stale gap after later evidence reports it fixed, completed, passed, or verified.
 - Preserve only claims that are internally consistent. A completed outcome and an unresolved claim about the same work must not coexist.
+- When c1 is present, it is the previously validated session checkpoint. Return a complete updated record, cite c1 for retained facts, and keep unchanged decision wording exact so canonical identities remain stable.
 - Artifact links are maintained deterministically by the sidecar; do not rewrite or invent file links.
 
 Return only the JSON object required by the output schema.
@@ -73,6 +78,83 @@ def _safe_error_detail(stdout: str, stderr: str) -> str:
     return "no structured diagnostic was emitted"
 
 
+def _usage_from_jsonl(stdout: str) -> dict[str, int] | None:
+    candidates: list[dict[str, Any]] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            usage = value.get("usage")
+            if isinstance(usage, dict) and any(
+                key in usage
+                for key in (
+                    "input_tokens",
+                    "prompt_tokens",
+                    "output_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                )
+            ):
+                candidates.append(usage)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for line in stdout.splitlines():
+        try:
+            visit(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if not candidates:
+        return None
+    source = candidates[-1]
+    input_tokens = int(source.get("input_tokens", source.get("prompt_tokens", 0)) or 0)
+    cached_input_tokens = int(source.get("cached_input_tokens", 0) or 0)
+    output_tokens = int(
+        source.get("output_tokens", source.get("completion_tokens", 0)) or 0
+    )
+    total_tokens = int(source.get("total_tokens", 0) or 0)
+    if total_tokens <= 0:
+        total_tokens = input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _record_usage(
+    settings: Settings,
+    packet: dict[str, Any],
+    *,
+    stdout: str,
+    status: str,
+) -> None:
+    if not settings.curator_usage_logging:
+        return
+    try:
+        settings.log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        record = {
+            "at": datetime.now(UTC).isoformat(),
+            "status": status,
+            "model": settings.model,
+            "packet_chars": len(json.dumps(packet, ensure_ascii=False)),
+            "evidence_items": len(packet.get("evidence", [])),
+            "checkpoint_mode": str(
+                (packet.get("checkpoint") or {}).get("mode") or "unknown"
+            ),
+            "usage": _usage_from_jsonl(stdout),
+        }
+        path = settings.log_dir / "curator-usage.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+        os.chmod(path, 0o600)
+    except OSError:
+        return
+
+
 class CodexLunaCurator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -83,6 +165,7 @@ class CodexLunaCurator:
             "--ask-for-approval",
             "never",
             "exec",
+            "--json",
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
@@ -111,15 +194,22 @@ class CodexLunaCurator:
         os.close(fd)
         output_path = Path(output_name)
         try:
+            packet_json = json.dumps(packet, ensure_ascii=False)
             result = subprocess.run(
                 self.command(output_path),
-                input=json.dumps(packet, ensure_ascii=False),
+                input=packet_json,
                 text=True,
                 capture_output=True,
                 check=False,
                 timeout=self.settings.curator_timeout_seconds,
                 cwd=self.settings.state_dir,
                 env=os.environ.copy(),
+            )
+            _record_usage(
+                self.settings,
+                packet,
+                stdout=result.stdout,
+                status="ok" if result.returncode == 0 else "failed",
             )
             if result.returncode != 0:
                 detail = _safe_error_detail(result.stdout, result.stderr)

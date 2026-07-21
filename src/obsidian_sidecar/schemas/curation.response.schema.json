@@ -6,9 +6,11 @@
     "title": { "type": "string" },
     "project_name": { "type": "string" },
     "project_slug": { "type": "string" },
+    "current_phase": { "type": "string" },
     "summary": { "type": "string" },
     "objective": { "type": "string" },
     "outcome": { "type": "string" },
+    "resume_context": { "type": "string" },
     "decisions": {
       "type": "array",
       "items": { "$ref": "#/$defs/evidencedItemWithRationale" }
@@ -23,7 +25,7 @@
     },
     "unresolved": {
       "type": "array",
-      "items": { "$ref": "#/$defs/evidencedItem" }
+      "items": { "$ref": "#/$defs/unresolvedItem" }
     },
     "next_actions": {
       "type": "array",
@@ -40,9 +42,11 @@
     "title",
     "project_name",
     "project_slug",
+    "current_phase",
     "summary",
     "objective",
     "outcome",
+    "resume_context",
     "decisions",
     "changes",
     "verification",
@@ -76,6 +80,22 @@
         }
       },
       "required": ["text", "rationale", "evidence_ids"]
+    },
+    "unresolvedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string" },
+        "disposition": {
+          "type": "string",
+          "enum": ["blocker", "scheduled", "monitor", "accepted", "dropped"]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["text", "disposition", "evidence_ids"]
     }
   }
 }

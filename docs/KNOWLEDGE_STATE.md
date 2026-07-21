@@ -1,8 +1,25 @@
 # Freshness And Decision Impact
 
-The Sidecar's session notes are immutable history. Freshness and decision
-impact live in a smaller stateful layer: canonical project hubs, canonical
-decision records, runbooks, and operational instructions.
+The Sidecar's session notes are durable history. A note may be updated as its
+Codex session continues, while the session ID remains its stable identity.
+Freshness and decision impact live in a smaller stateful layer: canonical
+project hubs, canonical decision records, runbooks, and operational
+instructions.
+
+## Long-Thread Checkpoints
+
+The private checkpoint layer is an efficiency and continuity cache, not a new
+knowledge authority. It retains the last validated decisions, unresolved items
+with explicit dispositions, current phase, resume context, and artifact links.
+On the next turn, Luna receives that compact state plus only new transcript
+messages. The repository remains authoritative for code, the vault remains the
+human-visible durable record, and a checkpoint is advanced only after the
+corresponding vault write succeeds.
+
+This keeps early decisions available throughout a long thread without sending
+the entire growing transcript on every curation pass. Checkpoints never enter
+the vault or Basic Memory index and never retain raw tool output, internal
+reasoning, developer instructions, or full transcripts.
 
 ## Freshness Envelope
 

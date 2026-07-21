@@ -17,6 +17,8 @@ memory.
 - Repositories remain authoritative for source and project documentation.
 - Raw transcripts, tool output, internal reasoning, and credentials stay out of
   the vault.
+- Long Codex threads are curated incrementally from a private validated
+  checkpoint plus only the newly appended user and final-answer messages.
 - Setup and updates are deterministic even when an AI agent guides the process.
 
 ## Quick Start
@@ -63,6 +65,9 @@ use `$obsidian-sidecar-setup`. See [Installation](docs/INSTALL.md).
   notes or repository artifacts.
 - Canonical local file links are preserved deterministically.
 - Notes use atomic writes and stable session-derived paths.
+- Checkpoints advance only after a validated skip or successful vault write,
+  use mode-0600 atomic JSON, and fall back safely when missing, stale, or
+  corrupt.
 - Low-confidence output goes to `00 Inbox/Needs Review`.
 - Invalid output goes to `_System/Quarantine` and retries at most three times.
 - The curator subprocess runs ephemerally, read-only, without user rules,
@@ -97,7 +102,8 @@ obsidian-sidecar knowledge-migrate  # read-only migration plan; add --apply
 ## Runtime Paths
 
 - Configuration: `~/.config/codex-obsidian-sidecar/config.json`
-- Queue and logs: `~/.local/share/codex-obsidian-sidecar/`
+- Queue, checkpoints, and numeric usage logs:
+  `~/.local/share/codex-obsidian-sidecar/`
 - Vault: selected during setup
 - Global Codex hook: `~/.codex/hooks.json`
 - Installed runtime: managed by `uv tool`
@@ -123,7 +129,7 @@ cannot masquerade as a working installation.
 
 ## Status
 
-Version `0.4.1` is a production candidate, not a hosted service. Before a
+Version `0.5.0` is a production candidate, not a hosted service. Before a
 public release, configure the repository, GitHub release environment, and PyPI
 Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
 `update-check` reports `not-published` and exact offline wheel installation is

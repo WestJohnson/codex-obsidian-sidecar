@@ -406,6 +406,9 @@ def _config_bytes(options: SetupOptions) -> bytes:
             },
         }
     )
+    raw.setdefault("checkpoint_enabled", True)
+    raw.setdefault("checkpoint_max_evidence_chars", 20_000)
+    raw.setdefault("curator_usage_logging", True)
     return (json.dumps(raw, indent=2) + "\n").encode()
 
 

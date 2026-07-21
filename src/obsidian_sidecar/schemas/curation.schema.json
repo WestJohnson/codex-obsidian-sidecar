@@ -7,9 +7,11 @@
     "title": { "type": "string", "minLength": 1, "maxLength": 120 },
     "project_name": { "type": "string", "minLength": 1, "maxLength": 100 },
     "project_slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$" },
+    "current_phase": { "type": "string", "minLength": 1, "maxLength": 200 },
     "summary": { "type": "string", "maxLength": 2000 },
     "objective": { "type": "string", "maxLength": 2000 },
     "outcome": { "type": "string", "maxLength": 3000 },
+    "resume_context": { "type": "string", "maxLength": 2000 },
     "decisions": {
       "type": "array",
       "maxItems": 20,
@@ -28,7 +30,7 @@
     "unresolved": {
       "type": "array",
       "maxItems": 20,
-      "items": { "$ref": "#/$defs/evidencedItem" }
+      "items": { "$ref": "#/$defs/unresolvedItem" }
     },
     "next_actions": {
       "type": "array",
@@ -48,9 +50,11 @@
     "title",
     "project_name",
     "project_slug",
+    "current_phase",
     "summary",
     "objective",
     "outcome",
+    "resume_context",
     "decisions",
     "changes",
     "verification",
@@ -69,7 +73,7 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 8,
-          "items": { "type": "string", "pattern": "^(u|a|g)[0-9]+$" },
+          "items": { "type": "string", "pattern": "^(u|a|g|c)[0-9]+$" },
           "uniqueItems": true
         }
       },
@@ -85,11 +89,30 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 8,
-          "items": { "type": "string", "pattern": "^(u|a|g)[0-9]+$" },
+          "items": { "type": "string", "pattern": "^(u|a|g|c)[0-9]+$" },
           "uniqueItems": true
         }
       },
       "required": ["text", "rationale", "evidence_ids"]
+    },
+    "unresolvedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "disposition": {
+          "type": "string",
+          "enum": ["blocker", "scheduled", "monitor", "accepted", "dropped"]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "pattern": "^(u|a|g|c)[0-9]+$" },
+          "uniqueItems": true
+        }
+      },
+      "required": ["text", "disposition", "evidence_ids"]
     }
   }
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 - 2026-07-20
+
+- Added private, versioned per-session checkpoints so long Codex threads reuse
+  validated durable state while curating only newly appended messages.
+- Added byte-cursor transcript deltas, bounded multi-chunk continuation, note
+  seeding for existing sessions, and recovery fallback for missing or corrupt
+  checkpoints.
+- Bounded delayed processing to the completed Stop event so a new in-progress
+  turn remains untouched until its own Stop hook arrives.
+- Restricted chronology rejection to contradictions inside the structured
+  curation, avoiding false removal of explicit caveats from mixed success and
+  remaining-work sentences.
+- Made checkpoint advancement transactional with validated vault writes and
+  preserved stable early decisions, dispositions, current phase, resume
+  context, and artifact references across turns.
+- Added content-free curator usage telemetry and checkpoint error logging plus
+  reversible configuration flags for both features.
+- Added deterministic coverage for delta compaction, cursor safety, fallback,
+  checkpoint security, and long-thread continuity.
+- Extended the live complete-pipeline critical gate to require a private
+  checkpoint with a full transcript cursor and mode-0600 permissions.
+
 ## 0.4.1 - 2026-07-20
 
 - Made same-session note moves reference-safe across date, confidence-route,

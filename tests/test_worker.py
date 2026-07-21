@@ -1,8 +1,10 @@
 import json
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 
 from obsidian_sidecar.config import Settings
+from obsidian_sidecar.checkpoints import checkpoint_path, load_checkpoint
 from obsidian_sidecar.curator import StaticCurator
 from obsidian_sidecar.queueing import enqueue_event
 from obsidian_sidecar.worker import daemon_once, process_ready
@@ -43,6 +45,166 @@ def test_worker_processes_end_to_end(
     assert not list(settings.queue_dir.glob("*.json"))
     assert len(list(settings.processed_dir.glob("*.json"))) == 1
     assert len(list((settings.vault_path / "60 Sessions").rglob("*.md"))) == 1
+    assert result.checkpoint_updates == 1
+    assert checkpoint_path(settings, "fixture-session-001").is_file()
+
+
+def test_worker_uses_saved_checkpoint_for_the_next_turn(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+    )
+    first_event = {
+        "session_id": "fixture-session-001",
+        "turn_id": "turn-1",
+        "transcript_path": str(transcript_path),
+        "cwd": str(tmp_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, first_event)
+    first = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    assert first.failed == 0
+
+    with transcript_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Approve the release."}
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The release was approved and verified.",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    second_curation = deepcopy(valid_curation)
+    second_curation["current_phase"] = "complete"
+    second_curation["resume_context"] = "No follow-up is required."
+    second_curation["outcome"] = "The release was approved and verified."
+    second_curation["changes"].append(
+        {"text": "Approved the release.", "evidence_ids": ["a1"]}
+    )
+    second_curation["verification"].append(
+        {"text": "Verified the approved release.", "evidence_ids": ["a1"]}
+    )
+    second_curation["unresolved"] = []
+    second_curation["next_actions"] = []
+    for field in ("decisions", "changes", "verification"):
+        retained = (
+            second_curation[field][:-1]
+            if field != "decisions"
+            else second_curation[field]
+        )
+        for item in retained:
+            item["evidence_ids"] = ["c1"]
+    enqueue_event(
+        settings,
+        {**first_event, "turn_id": "turn-2", "captured_at": "2026-07-14T08:03:00Z"},
+    )
+
+    second = process_ready(
+        settings, force=True, curator=StaticCurator(second_curation)
+    )
+
+    assert second.failed == 0
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert checkpoint is not None and checkpoint["update_count"] == 2
+    note = next((settings.vault_path / "60 Sessions").rglob("*.md")).read_text(
+        encoding="utf-8"
+    )
+    assert "capture_mode: incremental" in note
+    assert "Use one responsive implementation" in note
+    assert "## Resume Context\n\nNo follow-up is required." in note
+
+
+def test_failed_vault_write_does_not_advance_checkpoint(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+    )
+    event = {
+        "session_id": "fixture-session-001",
+        "turn_id": "turn-1",
+        "transcript_path": str(transcript_path),
+        "cwd": str(tmp_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, event)
+    process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    path = checkpoint_path(settings, "fixture-session-001")
+    before = path.read_bytes()
+    with transcript_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "Verified a new change."}
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    enqueue_event(
+        settings,
+        {**event, "turn_id": "turn-2", "captured_at": "2026-07-14T08:03:00Z"},
+    )
+    retry_curation = deepcopy(valid_curation)
+    for field in ("decisions", "changes", "verification", "unresolved", "next_actions"):
+        for item in retry_curation[field]:
+            item["evidence_ids"] = ["c1"]
+    def fail_write(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr("obsidian_sidecar.worker.write_curation", fail_write)
+
+    result = process_ready(
+        settings, force=True, curator=StaticCurator(retry_curation)
+    )
+
+    assert result.failed == 1
+    assert path.read_bytes() == before
 
 
 def test_invalid_output_is_quarantined_and_retried(

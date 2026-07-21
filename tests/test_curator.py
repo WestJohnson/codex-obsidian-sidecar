@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from obsidian_sidecar.curator import CodexLunaCurator, _safe_error_detail
+from obsidian_sidecar.curator import (
+    CodexLunaCurator,
+    _safe_error_detail,
+    _usage_from_jsonl,
+)
 from obsidian_sidecar.validation import response_schema_path
 
 
@@ -12,6 +16,7 @@ def test_curator_places_global_approval_flag_before_exec(settings) -> None:
 
     assert command[1:4] == ["--ask-for-approval", "never", "exec"]
     assert "--skip-git-repo-check" in command
+    assert "--json" in command
     assert command.index("--ask-for-approval") < command.index("exec")
 
 
@@ -62,3 +67,28 @@ def test_curator_failure_detail_does_not_echo_input_packet() -> None:
     assert "private packet" not in detail
     assert "abcdefghijklmnopqrstuvwx" not in detail
     assert "invalid_json_schema" in detail
+
+
+def test_usage_parser_reads_codex_jsonl_turn_completion() -> None:
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps(
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 4200,
+                        "cached_input_tokens": 3000,
+                        "output_tokens": 600,
+                    },
+                }
+            ),
+        ]
+    )
+
+    assert _usage_from_jsonl(stdout) == {
+        "input_tokens": 4200,
+        "cached_input_tokens": 3000,
+        "output_tokens": 600,
+        "total_tokens": 4800,
+    }

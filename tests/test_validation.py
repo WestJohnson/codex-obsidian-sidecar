@@ -50,6 +50,7 @@ def test_newer_resolution_removes_stale_unresolved(valid_curation: dict) -> None
     value["unresolved"] = [
         {
             "text": "The post-paywall application remains unexamined.",
+            "disposition": "blocker",
             "evidence_ids": ["a1"],
         }
     ]
@@ -91,6 +92,7 @@ def test_same_evidence_can_support_success_and_a_scoped_caveat(
     value["unresolved"] = [
         {
             "text": "The separate non-interactive print mode may return an empty final JSON result.",
+            "disposition": "monitor",
             "evidence_ids": ["a1"],
         }
     ]
@@ -106,6 +108,45 @@ def test_same_evidence_can_support_success_and_a_scoped_caveat(
                     "print mode may still return an empty final JSON result."
                 ),
             }
+        ],
+    }
+
+    result = validate_curation(value, evidence, minimum_confidence=0.65)
+
+    assert result.valid
+
+
+def test_newer_success_sentence_does_not_erase_explicit_remaining_caveats(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["unresolved"].extend(
+        [
+            {
+                "text": "The revised waiver still needs legal review.",
+                "disposition": "blocker",
+                "evidence_ids": ["c1"],
+            },
+            {
+                "text": "The exact overnight amount remains undecided.",
+                "disposition": "blocker",
+                "evidence_ids": ["c1"],
+            },
+        ]
+    )
+    evidence = {
+        "cwd": "/tmp",
+        "evidence": [
+            {"id": "c1", "kind": "checkpoint", "text": "Prior durable state."},
+            {
+                "id": "a1",
+                "kind": "conversation",
+                "role": "assistant",
+                "text": (
+                    "The revised waiver is complete. Legal review remains required "
+                    "and the exact overnight amount is still undecided."
+                ),
+            },
         ],
     }
 

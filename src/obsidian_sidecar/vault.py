@@ -114,7 +114,12 @@ def _evidenced_bullets(
     lines: list[str] = []
     for item in items:
         evidence = ", ".join(f"`{value}`" for value in item.get("evidence_ids", []))
-        line = f"- {str(item.get('text', '')).strip()} _(evidence: {evidence})_"
+        text = str(item.get("text", "")).strip()
+        disposition = str(item.get("disposition") or "").strip()
+        if disposition:
+            label = disposition.replace("-", " ").title()
+            text = f"**{label}:** {text}"
+        line = f"- {text} _(evidence: {evidence})_"
         if include_rationale and str(item.get("rationale", "")).strip():
             line += f"\n  - Rationale: {str(item['rationale']).strip()}"
         lines.append(line)
@@ -144,6 +149,10 @@ def _render_note(
         "tags": ["work-session", *curation.get("topics", [])],
         "managed_by": MANAGED_BY,
     }
+    checkpoint = packet.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        metadata["capture_mode"] = str(checkpoint.get("mode") or "baseline")
+        metadata["checkpoint_version"] = int(checkpoint.get("version") or 1)
     source_revision = _git_revision(packet)
     if source_revision:
         metadata["source_revision"] = source_revision
@@ -168,6 +177,14 @@ def _render_note(
 ## Outcome
 
 {str(curation.get("outcome", "")).strip() or "No outcome recorded."}
+
+## Current Phase
+
+{str(curation.get("current_phase", "")).strip() or "No current phase recorded."}
+
+## Resume Context
+
+{str(curation.get("resume_context", "")).strip() or "Review the latest outcome before resuming."}
 
 ## Decisions
 

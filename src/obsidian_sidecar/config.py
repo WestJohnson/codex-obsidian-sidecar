@@ -19,6 +19,9 @@ class Settings:
     reasoning_effort: str = "low"
     debounce_seconds: int = 180
     curator_timeout_seconds: int = 240
+    checkpoint_enabled: bool = True
+    checkpoint_max_evidence_chars: int = 20_000
+    curator_usage_logging: bool = True
     minimum_confidence: float = 0.65
     basic_memory_project: str = "codex-vault"
     auto_git_backup: bool = True
@@ -74,6 +77,10 @@ class Settings:
     def lock_dir(self) -> Path:
         return self.state_dir / "locks"
 
+    @property
+    def checkpoint_dir(self) -> Path:
+        return self.state_dir / "checkpoints"
+
     def ensure_runtime_dirs(self) -> None:
         for path in (
             self.queue_dir,
@@ -81,6 +88,7 @@ class Settings:
             self.failed_dir,
             self.log_dir,
             self.lock_dir,
+            self.checkpoint_dir,
         ):
             path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -119,6 +127,11 @@ def load_settings(path: Path | None = None) -> Settings:
         reasoning_effort=str(raw.get("reasoning_effort", "low")),
         debounce_seconds=max(0, int(raw.get("debounce_seconds", 180))),
         curator_timeout_seconds=max(30, int(raw.get("curator_timeout_seconds", 240))),
+        checkpoint_enabled=bool(raw.get("checkpoint_enabled", True)),
+        checkpoint_max_evidence_chars=max(
+            4_000, int(raw.get("checkpoint_max_evidence_chars", 20_000))
+        ),
+        curator_usage_logging=bool(raw.get("curator_usage_logging", True)),
         minimum_confidence=float(raw.get("minimum_confidence", 0.65)),
         basic_memory_project=str(raw.get("basic_memory_project", "codex-vault")),
         auto_git_backup=bool(raw.get("auto_git_backup", True)),

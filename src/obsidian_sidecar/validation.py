@@ -145,23 +145,6 @@ def _chronology_errors(curation: dict[str, Any], packet: dict[str, Any]) -> list
                     f"unresolved[{index}] contradicts newer resolved evidence"
                 )
                 break
-        else:
-            for evidence_index, source in enumerate(evidence):
-                if (
-                    evidence_index <= unresolved_order
-                    or source.get("kind") != "conversation"
-                ):
-                    continue
-                source_text = str(source.get("text", ""))
-                sentences = re.split(r"(?<=[.!?])\s+|\n+", source_text)
-                if any(
-                    _has_positive_resolution(sentence) and _related(text, sentence)
-                    for sentence in sentences
-                ):
-                    errors.append(
-                        f"unresolved[{index}] is stale relative to newer conversation evidence"
-                    )
-                    break
     return errors
 
 
