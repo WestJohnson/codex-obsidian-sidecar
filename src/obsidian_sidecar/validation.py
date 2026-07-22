@@ -192,6 +192,31 @@ def load_schema() -> dict[str, Any]:
     )
 
 
+def normalize_curation_metadata(curation: dict[str, Any]) -> dict[str, Any]:
+    """Normalize bounded, non-semantic metadata without masking invalid output."""
+
+    normalized = dict(curation)
+    topics = curation.get("topics")
+    if not isinstance(topics, list):
+        return normalized
+
+    topic_schema = load_schema()["properties"]["topics"]
+    item_schema = topic_schema["items"]
+    if not all(Draft202012Validator(item_schema).is_valid(topic) for topic in topics):
+        return normalized
+
+    maximum = int(topic_schema["maxItems"])
+    seen: set[str] = set()
+    deduplicated: list[str] = []
+    for topic in topics:
+        if topic in seen:
+            continue
+        seen.add(topic)
+        deduplicated.append(topic)
+    normalized["topics"] = deduplicated[:maximum]
+    return normalized
+
+
 def validate_curation(
     curation: dict[str, Any],
     packet: dict[str, Any],

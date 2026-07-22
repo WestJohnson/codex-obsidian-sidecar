@@ -6,7 +6,7 @@ from pathlib import Path
 from obsidian_sidecar.config import Settings
 from obsidian_sidecar.checkpoints import checkpoint_path, load_checkpoint
 from obsidian_sidecar.curator import StaticCurator
-from obsidian_sidecar.queueing import enqueue_event
+from obsidian_sidecar.queueing import enqueue_event, save_event
 from obsidian_sidecar.worker import daemon_once, process_ready
 from obsidian_sidecar.coordination import CloudLease
 
@@ -47,6 +47,109 @@ def test_worker_processes_end_to_end(
     assert len(list((settings.vault_path / "60 Sessions").rglob("*.md"))) == 1
     assert result.checkpoint_updates == 1
     assert checkpoint_path(settings, "fixture-session-001").is_file()
+
+
+def test_worker_normalizes_safe_topic_metadata_before_validation(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+    )
+    curation = deepcopy(valid_curation)
+    curation["topics"] = [f"topic-{index}" for index in range(14)]
+    enqueue_event(
+        settings,
+        {
+            "session_id": "fixture-session-001",
+            "turn_id": "turn-1",
+            "transcript_path": str(transcript_path),
+            "cwd": str(tmp_path),
+            "captured_at": "2026-07-14T08:01:00Z",
+        },
+    )
+
+    result = process_ready(settings, force=True, curator=StaticCurator(curation))
+
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert result.failed == 0
+    assert result.notes_written == 1
+    assert checkpoint is not None
+    assert checkpoint["curation"]["topics"] == [
+        f"topic-{index}" for index in range(12)
+    ]
+
+
+def test_worker_reconciles_only_failed_events_covered_by_a_committed_cursor(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+    )
+    event = {
+        "session_id": "fixture-session-001",
+        "turn_id": "turn-1",
+        "transcript_path": str(transcript_path),
+        "cwd": str(tmp_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, event)
+    first = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    assert first.failed == 0
+
+    with transcript_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "A later uncovered turn."}
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    covered = settings.failed_dir / "covered--max-attempts.json"
+    uncovered = settings.failed_dir / "uncovered--max-attempts.json"
+    save_event(
+        covered,
+        {**event, "turn_id": "failed-covered", "attempts": 3},
+    )
+    save_event(
+        uncovered,
+        {
+            **event,
+            "turn_id": "failed-uncovered",
+            "captured_at": "2026-07-14T08:03:00Z",
+            "attempts": 3,
+        },
+    )
+
+    result = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+
+    assert result.reconciled_failed_events == 1
+    assert not covered.exists()
+    assert uncovered.exists()
+    processed = next(
+        settings.processed_dir.glob("covered--max-attempts--superseded-by-checkpoint.json")
+    )
+    record = json.loads(processed.read_text(encoding="utf-8"))
+    assert record["disposition"] == "superseded-by-checkpoint"
+    assert record["reconciliation"]["checkpoint_byte_offset"] >= record[
+        "reconciliation"
+    ]["event_boundary_byte_offset"]
 
 
 def test_worker_uses_saved_checkpoint_for_the_next_turn(
@@ -229,6 +332,37 @@ def test_invalid_output_is_quarantined_and_retried(
     queued = list(settings.queue_dir.glob("*.json"))
     assert len(queued) == 1
     assert len(list((settings.vault_path / "_System/Quarantine").glob("*.json"))) == 1
+
+
+def test_final_failed_attempt_is_persisted_before_quarantine(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+) -> None:
+    invalid = deepcopy(valid_curation)
+    invalid["changes"] = [{"text": "Ungrounded", "evidence_ids": ["a999"]}]
+    enqueue_event(
+        settings,
+        {
+            "session_id": "fixture-session-001",
+            "turn_id": "turn-1",
+            "transcript_path": str(transcript_path),
+            "cwd": str(tmp_path),
+            "captured_at": "2026-07-14T08:01:00Z",
+        },
+    )
+
+    for _ in range(3):
+        process_ready(settings, force=True, curator=StaticCurator(invalid))
+
+    failed = json.loads(
+        next(settings.failed_dir.glob("*--max-attempts.json")).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert failed["attempts"] == 3
+    assert "unknown evidence id" in failed["last_error"]
 
 
 def test_worker_redacts_secrets_from_failure_state(

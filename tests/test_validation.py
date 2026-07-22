@@ -1,7 +1,7 @@
 from copy import deepcopy
 from pathlib import Path
 
-from obsidian_sidecar.validation import validate_curation
+from obsidian_sidecar.validation import normalize_curation_metadata, validate_curation
 
 
 def packet() -> dict:
@@ -12,6 +12,48 @@ def test_valid_grounded_curation_passes(valid_curation: dict) -> None:
     result = validate_curation(valid_curation, packet(), minimum_confidence=0.65)
     assert result.valid
     assert not result.review_required
+
+
+def test_topic_metadata_is_stably_deduplicated_and_capped(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["topics"] = [f"topic-{index}" for index in range(14)] + ["topic-3"]
+
+    normalized = normalize_curation_metadata(value)
+
+    assert normalized["topics"] == [f"topic-{index}" for index in range(12)]
+    assert len(value["topics"]) == 15
+    assert validate_curation(normalized, packet(), minimum_confidence=0.65).valid
+
+
+def test_invalid_topic_metadata_is_not_hidden_by_normalization(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["topics"] = [f"topic-{index}" for index in range(12)] + ["Bad Topic"]
+
+    normalized = normalize_curation_metadata(value)
+    result = validate_curation(normalized, packet(), minimum_confidence=0.65)
+
+    assert normalized["topics"] == value["topics"]
+    assert not result.valid
+
+
+def test_metadata_normalization_never_truncates_semantic_lists(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["changes"] = [
+        {"text": f"Verified change {index}", "evidence_ids": ["a1"]}
+        for index in range(31)
+    ]
+
+    normalized = normalize_curation_metadata(value)
+    result = validate_curation(normalized, packet(), minimum_confidence=0.65)
+
+    assert len(normalized["changes"]) == 31
+    assert not result.valid
 
 
 def test_unknown_evidence_fails(valid_curation: dict) -> None:

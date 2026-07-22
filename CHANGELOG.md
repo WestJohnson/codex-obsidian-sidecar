@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.1 - 2026-07-21
+
+- Added safe, stable topic deduplication and a 12-topic metadata cap before
+  strict validation while leaving malformed topics and semantic lists fail-closed.
+- Made the curator's topic cardinality contract explicit to prevent avoidable
+  model retries.
+- Added checkpoint-proven reconciliation for failed events whose exact Stop
+  boundaries are already covered by a newer committed transcript cursor.
+- Kept reconciled failure records with an auditable
+  `superseded-by-checkpoint` disposition instead of deleting or reprocessing
+  them.
+- Clarified queue alerts as curation failures rather than vault-sync failures
+  and persisted the final retry count before quarantine.
+
 ## 0.5.0 - 2026-07-20
 
 - Added private, versioned per-session checkpoints so long Codex threads reuse

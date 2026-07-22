@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from obsidian_sidecar.curator import (
+    CURATOR_PROMPT,
     CodexLunaCurator,
     _safe_error_detail,
     _usage_from_jsonl,
@@ -18,6 +19,10 @@ def test_curator_places_global_approval_flag_before_exec(settings) -> None:
     assert "--skip-git-repo-check" in command
     assert "--json" in command
     assert command.index("--ask-for-approval") < command.index("exec")
+
+
+def test_curator_prompt_states_the_strict_topic_limit() -> None:
+    assert "no more than 12 unique lowercase hyphenated topics" in CURATOR_PROMPT
 
 
 def test_response_schema_uses_only_model_supported_constraints() -> None:

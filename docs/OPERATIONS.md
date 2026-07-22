@@ -15,7 +15,9 @@
    process.
 5. Locally validated output is written atomically to the Obsidian vault and
    indexed by Basic Memory. The worker advances the checkpoint cursor only
-   after a validated skip or a successful vault write.
+   after a validated skip or a successful vault write. It also archives an old
+   failed event as `superseded-by-checkpoint` only when that committed byte
+   cursor covers the event's exact completed-Stop boundary.
 6. Daily maintenance checks structure, links, duplicates, secrets, queues,
    freshness, decision records, Obsidian CLI, Basic Memory, and Git backup
    health. It also refreshes `_System/Knowledge/latest.md`.
@@ -29,9 +31,10 @@
    an exact source/task fingerprint match.
 10. A five-minute reconnect timer notices a returned peer and publishes a
     matching stage within the configured ten-minute rate limit.
-11. The Mac displays a deduplicated notification only for failed queue events,
-    Syncthing conflicts, persistent cloud failure markers, or a staged report
-    left unpublished for more than 24 hours.
+11. The Mac displays a deduplicated notification only for failed curation
+    events, Syncthing conflicts, persistent cloud failure markers, or a staged
+    report left unpublished for more than 24 hours. Curation and sync failures
+    are named as separate subsystems.
 
 Raw transcripts, tool output, reasoning, developer instructions, and hook
 payload contents are not copied into the vault.
@@ -161,9 +164,12 @@ launchctl kickstart -k "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 Hook events without a usable transcript path are skipped before queueing, and
 legacy queued copies are consumed as non-errors. Other failed events retry
 three times, then move to the `failed` directory. Invalid model output is also
-written to `_System/Quarantine` without retained secrets. Inspect the event's
-`last_error`, correct the underlying issue, move the event back to `queue`, and
-run `process --force`.
+written to `_System/Quarantine` without retained secrets. Before a retry, the
+worker checks whether a newer committed checkpoint cursor already covers that
+event's exact transcript boundary. Covered events move to `processed` with an
+auditable `superseded-by-checkpoint` disposition and are not curated again.
+For an uncovered event, inspect `last_error`, correct the underlying issue,
+move it back to `queue`, and run `process --force`.
 
 A corrupt checkpoint is ignored, recorded without content in
 `checkpoint-errors.jsonl`, and replaced only after the recovery curation is

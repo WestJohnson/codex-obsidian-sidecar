@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import time
 import json
+import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +30,8 @@ from .queueing import (
     utc_now,
 )
 from .security import redact_text
-from .transcript import build_curation_packet
-from .validation import validate_curation
+from .transcript import _cursor_at_cutoff, build_curation_packet
+from .validation import normalize_curation_metadata, validate_curation
 from .vault import write_curation, write_quarantine
 from .vault import _atomic_write
 
@@ -42,6 +43,7 @@ class ProcessSummary:
     skipped: int = 0
     failed: int = 0
     processed_events: int = 0
+    reconciled_failed_events: int = 0
     checkpoint_updates: int = 0
     checkpoint_chunks_pending: int = 0
     note_paths: list[str] | None = None
@@ -97,10 +99,84 @@ def _record_failure(paths: list[Path], settings: Settings, error: Exception) -> 
         event["attempts"] = int(event.get("attempts", 0)) + 1
         event["last_error"] = f"{type(error).__name__}: {clean_error[:500]}"
         event["last_attempt_at"] = utc_now()
+        save_event(path, event)
         if event["attempts"] >= 3:
             move_event(path, settings.failed_dir, "max-attempts")
-        else:
+
+
+def _checkpoint_coverage(
+    settings: Settings, event: dict[str, Any]
+) -> dict[str, int] | None:
+    session_id = event.get("session_id")
+    transcript_value = event.get("transcript_path")
+    captured_at = event.get("captured_at")
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (session_id, transcript_value, captured_at)
+    ):
+        return None
+    try:
+        boundary = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if boundary.tzinfo is None:
+        return None
+
+    checkpoint = load_checkpoint(settings, session_id)
+    if checkpoint is None:
+        return None
+    cursor = checkpoint.get("cursor")
+    if not isinstance(cursor, dict):
+        return None
+
+    transcript_path = Path(transcript_value).expanduser()
+    checkpoint_path_value = str(cursor.get("transcript_path") or "")
+    checkpoint_offset = cursor.get("byte_offset")
+    checkpoint_update_count = checkpoint.get("update_count")
+    if (
+        not transcript_path.is_file()
+        or not checkpoint_path_value
+        or Path(checkpoint_path_value).expanduser() != transcript_path
+        or isinstance(checkpoint_offset, bool)
+        or not isinstance(checkpoint_offset, int)
+        or checkpoint_offset < 0
+        or checkpoint_offset > transcript_path.stat().st_size
+        or isinstance(checkpoint_update_count, bool)
+        or not isinstance(checkpoint_update_count, int)
+        or checkpoint_update_count < 1
+    ):
+        return None
+
+    event_boundary = _cursor_at_cutoff(transcript_path, captured_at)
+    if checkpoint_offset < event_boundary:
+        return None
+    return {
+        "checkpoint_update_count": checkpoint_update_count,
+        "checkpoint_byte_offset": checkpoint_offset,
+        "event_boundary_byte_offset": event_boundary,
+    }
+
+
+def reconcile_superseded_failures(settings: Settings) -> int:
+    reconciled = 0
+    for path in sorted(settings.failed_dir.glob("*.json")):
+        try:
+            event = load_event(path)
+            coverage = _checkpoint_coverage(settings, event)
+            if coverage is None:
+                continue
+            event["disposition"] = "superseded-by-checkpoint"
+            event["reconciled_at"] = utc_now()
+            event["reconciliation"] = {
+                "reason": "superseded-by-checkpoint",
+                **coverage,
+            }
             save_event(path, event)
+            move_event(path, settings.processed_dir, "superseded-by-checkpoint")
+            reconciled += 1
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+    return reconciled
 
 
 def process_ready(
@@ -119,6 +195,7 @@ def process_ready(
         if not lock.acquired:
             summary.deferred_reason = "local-worker-lock"
             return summary
+        summary.reconciled_failed_events = reconcile_superseded_failures(settings)
         groups = ready_groups(settings, force=force)
         summary.groups_seen = len(groups)
         if not groups:
@@ -160,7 +237,9 @@ def process_ready(
                             settings.checkpoint_max_evidence_chars
                         ),
                     )
-                    curation = active_curator.curate(packet)
+                    curation = normalize_curation_metadata(
+                        active_curator.curate(packet)
+                    )
                     validation = validate_curation(
                         curation,
                         packet,

@@ -30,6 +30,7 @@ def test_alert_cycle_notifies_once_then_suppresses(settings: Settings) -> None:
     assert second["status"] == "suppressed"
     assert len(notifications) == 1
     assert "failed events" in notifications[0][1]
+    assert "vault sync is a separate subsystem" in notifications[0][1]
 
 
 def test_alert_status_only_flags_staged_report_after_24_hours(

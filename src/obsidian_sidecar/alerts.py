@@ -34,7 +34,10 @@ def alert_status(settings: Settings, *, now: datetime | None = None) -> dict[str
         alerts.append(
             {
                 "code": "queue-failed",
-                "title": "Obsidian memory queue has failed events",
+                "title": (
+                    "Obsidian session curation has failed events "
+                    "(vault sync is a separate subsystem)"
+                ),
                 "count": len(failed),
             }
         )

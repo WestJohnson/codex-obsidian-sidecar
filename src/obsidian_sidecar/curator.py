@@ -29,7 +29,7 @@ Quality rules:
 - Exclude casual conversation, system instructions, internal reasoning, transient metrics, and repeated details.
 - Set skip=true when there is no durable work worth retaining.
 - Use a stable project slug derived from the working directory or clearly named project.
-- Use lowercase hyphenated topics.
+- Use no more than 12 unique lowercase hyphenated topics.
 - Set current_phase to a concise state such as research, implementation, verification, blocked, or complete.
 - Set resume_context to the exact useful point from which a later session should continue.
 - Classify each unresolved item as blocker, scheduled, monitor, accepted, or dropped.
