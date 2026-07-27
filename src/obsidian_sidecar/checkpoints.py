@@ -23,6 +23,11 @@ CURATION_LIST_FIELDS = (
 )
 
 
+def _decision_fingerprint(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text.strip()).casefold()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def checkpoint_path(settings: Settings, session_id: str) -> Path:
     token = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:24]
     return settings.checkpoint_dir / f"{token}.json"
@@ -113,19 +118,40 @@ def save_checkpoint(
     cursor = checkpoint_meta.get("cursor")
     if not isinstance(cursor, dict):
         raise ValueError("packet checkpoint cursor is invalid")
-    artifacts: list[dict[str, str]] = []
+    decisions_by_evidence: dict[str, set[str]] = {}
+    for decision in curation.get("decisions", []):
+        if not isinstance(decision, dict):
+            continue
+        text = str(decision.get("text") or "").strip()
+        if not text:
+            continue
+        fingerprint = _decision_fingerprint(text)
+        for evidence_id in decision.get("evidence_ids", []):
+            value = str(evidence_id)
+            if value == "c1":
+                continue
+            decisions_by_evidence.setdefault(value, set()).add(fingerprint)
+    artifacts: list[dict[str, Any]] = []
     for item in packet.get("artifacts", []):
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "").strip()
         if not path:
             continue
-        artifacts.append(
-            {
-                "label": str(item.get("label") or Path(path).name)[:200],
-                "path": path,
-            }
-        )
+        fingerprints = {
+            str(value)
+            for value in item.get("decision_fingerprints", [])
+            if isinstance(value, str) and value
+        }
+        evidence_id = str(item.get("evidence_id") or "")
+        fingerprints |= decisions_by_evidence.get(evidence_id, set())
+        artifact: dict[str, Any] = {
+            "label": str(item.get("label") or Path(path).name)[:200],
+            "path": path,
+        }
+        if fingerprints:
+            artifact["decision_fingerprints"] = sorted(fingerprints)
+        artifacts.append(artifact)
     value = {
         "version": CHECKPOINT_VERSION,
         "session_id": session_id,
@@ -134,6 +160,7 @@ def save_checkpoint(
         "captured_at": str(packet.get("captured_at") or datetime.now(UTC).isoformat()),
         "updated_at": datetime.now(UTC).isoformat(),
         "update_count": int((previous or {}).get("update_count", 0)) + 1,
+        "model_provenance": dict(packet.get("model_provenance") or {}),
         "curation": curation,
         "artifacts": artifacts,
     }
@@ -147,10 +174,13 @@ def _strip_evidence(item: dict[str, Any]) -> dict[str, str]:
     value = {"text": str(item.get("text") or "").strip()[:1000]}
     rationale = str(item.get("rationale") or "").strip()
     disposition = str(item.get("disposition") or "").strip()
+    decision_type = str(item.get("decision_type") or "").strip()
     if rationale:
         value["rationale"] = rationale[:1000]
     if disposition:
         value["disposition"] = disposition[:40]
+    if decision_type:
+        value["decision_type"] = decision_type[:40]
     return value
 
 
@@ -331,6 +361,7 @@ def seed_checkpoint_from_vault(
         "captured_at": str(metadata.get("updated") or metadata.get("date") or ""),
         "updated_at": str(metadata.get("updated") or ""),
         "update_count": 0,
+        "model_provenance": dict(metadata.get("model_provenance") or {}),
         "curation": curation,
         "artifacts": _session_artifacts(body, cwd),
     }

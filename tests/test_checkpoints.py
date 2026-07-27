@@ -76,4 +76,62 @@ def test_existing_session_note_seeds_first_checkpoint(
     assert seeded["cursor"]["byte_offset"] is None
     assert seeded["cursor"]["after_timestamp"] == "2026-07-14T08:01:00Z"
     assert seeded["curation"]["current_phase"] == "verification"
+    assert (
+        seeded["curation"]["decisions"][0]["decision_type"]
+        == "implemented-choice"
+    )
     assert seeded["curation"]["unresolved"][0]["disposition"] == "scheduled"
+
+
+def test_checkpoint_persists_artifact_to_decision_associations(
+    settings, tmp_path: Path
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("# First\n", encoding="utf-8")
+    second.write_text("# Second\n", encoding="utf-8")
+    packet = {
+        "session_id": "artifact-associations",
+        "captured_at": "2026-07-25T20:00:00Z",
+        "checkpoint": {
+            "cursor": {
+                "transcript_path": str(tmp_path / "transcript.jsonl"),
+                "byte_offset": 10,
+                "after_timestamp": None,
+            }
+        },
+        "artifacts": [
+            {"label": "First", "path": str(first), "evidence_id": "a1"},
+            {"label": "Second", "path": str(second), "evidence_id": "a2"},
+        ],
+        "model_provenance": {
+            "model": "gpt-test-model",
+            "provider": "openai",
+        },
+    }
+    curation = {
+        "decisions": [
+            {
+                "text": "Associate only the first artifact.",
+                "decision_type": "implemented-choice",
+                "evidence_ids": ["a1"],
+            },
+            {
+                "text": "Associate only the second artifact.",
+                "decision_type": "implemented-choice",
+                "evidence_ids": ["a2"],
+            },
+        ]
+    }
+
+    path = save_checkpoint(settings, packet, curation, previous=None)
+    assert path is not None
+    loaded = load_checkpoint(settings, "artifact-associations")
+    assert loaded is not None
+    assert loaded["model_provenance"]["model"] == "gpt-test-model"
+    fingerprints = [
+        artifact["decision_fingerprints"] for artifact in loaded["artifacts"]
+    ]
+    assert len(fingerprints[0]) == 1
+    assert len(fingerprints[1]) == 1
+    assert fingerprints[0] != fingerprints[1]

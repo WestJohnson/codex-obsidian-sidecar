@@ -85,6 +85,16 @@
       "properties": {
         "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "rationale": { "type": "string", "maxLength": 1000 },
+        "decision_type": {
+          "type": "string",
+          "enum": [
+            "operator-decision",
+            "implemented-choice",
+            "recommendation",
+            "observation",
+            "legacy-unclassified"
+          ]
+        },
         "evidence_ids": {
           "type": "array",
           "minItems": 1,
@@ -93,7 +103,7 @@
           "uniqueItems": true
         }
       },
-      "required": ["text", "rationale", "evidence_ids"]
+      "required": ["text", "rationale", "decision_type", "evidence_ids"]
     },
     "unresolvedItem": {
       "type": "object",

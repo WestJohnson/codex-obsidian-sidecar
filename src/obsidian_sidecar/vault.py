@@ -20,6 +20,10 @@ MANAGED_BY = "codex-obsidian-sidecar"
 IGNORED_VAULT_PARTS = frozenset({".git", ".obsidian", ".stversions", ".trash"})
 SESSION_BLOCK_START = "<!-- SIDECAR:SESSIONS:START -->"
 SESSION_BLOCK_END = "<!-- SIDECAR:SESSIONS:END -->"
+PROJECT_STATE_BLOCK_START = "<!-- SIDECAR:CURRENT-STATE:START -->"
+PROJECT_STATE_BLOCK_END = "<!-- SIDECAR:CURRENT-STATE:END -->"
+PROJECT_WORK_BLOCK_START = "<!-- SIDECAR:OPEN-WORK:START -->"
+PROJECT_WORK_BLOCK_END = "<!-- SIDECAR:OPEN-WORK:END -->"
 CANONICAL_REFERENCE_TYPES = frozenset(
     {"project", "decision", "runbook", "operational-instruction"}
 )
@@ -116,10 +120,13 @@ def _evidenced_bullets(
         evidence = ", ".join(f"`{value}`" for value in item.get("evidence_ids", []))
         text = str(item.get("text", "")).strip()
         disposition = str(item.get("disposition") or "").strip()
+        decision_type = str(item.get("decision_type") or "").strip()
         if disposition:
             label = disposition.replace("-", " ").title()
             text = f"**{label}:** {text}"
         line = f"- {text} _(evidence: {evidence})_"
+        if decision_type:
+            line += f"\n  - Type: `{decision_type}`"
         if include_rationale and str(item.get("rationale", "")).strip():
             line += f"\n  - Rationale: {str(item['rationale']).strip()}"
         lines.append(line)
@@ -153,11 +160,26 @@ def _render_note(
     if isinstance(checkpoint, dict):
         metadata["capture_mode"] = str(checkpoint.get("mode") or "baseline")
         metadata["checkpoint_version"] = int(checkpoint.get("version") or 1)
+    model_provenance = packet.get("model_provenance")
+    if isinstance(model_provenance, dict) and model_provenance:
+        metadata["model_provenance"] = {
+            key: str(value)
+            for key, value in model_provenance.items()
+            if key in {"model", "provider", "effort", "harness"} and value
+        }
     source_revision = _git_revision(packet)
     if source_revision:
         metadata["source_revision"] = source_revision
     frontmatter = yaml.safe_dump(metadata, sort_keys=False, allow_unicode=False).strip()
     project_link = f"[[10 Projects/{project_slug}/Project|{curation['project_name']}]]"
+    provenance = metadata.get("model_provenance", {})
+    model_line = (
+        f"- Model: `{provenance.get('model', 'unknown')}`"
+        f" via `{provenance.get('harness', 'unknown')}`"
+        f" at effort `{provenance.get('effort', 'unknown')}`"
+        if provenance
+        else "- Model: not recorded."
+    )
     body = f"""---
 {frontmatter}
 ---
@@ -215,6 +237,7 @@ def _render_note(
 - Codex session: `{session_id}`
 - Turn: `{packet.get("turn_id") or "unknown"}`
 - Working directory: `{packet.get("cwd") or "unknown"}`
+{model_line}
 - Curated from user requests, final answers, and bounded Git metadata only.
 """
     if contains_secret(body):
@@ -243,7 +266,17 @@ def _project_page(project_name: str, project_slug: str, source_cwd: str) -> str:
 
 ## Current Context
 
-Durable work history and decisions for this project.
+{PROJECT_STATE_BLOCK_START}
+- Phase: No current phase recorded.
+- Latest outcome: No session has been captured yet.
+- Resume: Review the latest project evidence before resuming.
+{PROJECT_STATE_BLOCK_END}
+
+## Ranked Open Work
+
+{PROJECT_WORK_BLOCK_START}
+- None recorded.
+{PROJECT_WORK_BLOCK_END}
 
 ## Sessions
 
@@ -461,6 +494,7 @@ def write_curation(
     ensure_vault_layout(settings.vault_path)
     from .knowledge import (
         resolve_project_identity,
+        update_project_state,
         update_project_metadata,
         upsert_decision_records,
     )
@@ -549,6 +583,7 @@ def write_curation(
     for old_path, _ in duplicate_sessions:
         old_path.unlink()
     _update_project_sessions(project_path, settings.vault_path, project_slug)
+    update_project_state(settings.vault_path, project_path)
     for affected_project in affected_projects - {project_slug}:
         affected_path = (
             settings.vault_path / "10 Projects" / affected_project / "Project.md"
@@ -557,6 +592,7 @@ def write_curation(
             _update_project_sessions(
                 affected_path, settings.vault_path, affected_project
             )
+            update_project_state(settings.vault_path, affected_path)
     return WriteResult(
         note_path,
         project_path,

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0 - 2026-07-26
+
+- Typed canonical records as operator decisions, implemented choices,
+  recommendations, observations, or legacy-unclassified items, with
+  evidence-derived authority and promotion status.
+- Added conservative pre-promotion duplicate detection: high-confidence
+  wording variants reuse a canonical record, while probable duplicates are
+  held in a project review index.
+- Split decision impact into direct, inferred, and related edges; corrected
+  checkpoint artifact association so retained decisions no longer inherit
+  every retained artifact.
+- Added managed project-hub rollups for current phase, latest outcome, resume
+  context, verification count, and ranked open work.
+- Added sanitized model, provider, effort, and harness provenance to packets,
+  private checkpoints, and session notes when the transcript supplies it.
+- Extended plan-first knowledge migration to classify legacy decisions,
+  conservatively quarantine unknown authority, flag possible duplicates,
+  tighten legacy impact edges, refresh project hubs, and remain idempotent.
+
 ## 0.5.1 - 2026-07-21
 
 - Added safe, stable topic deduplication and a 12-topic metadata cap before

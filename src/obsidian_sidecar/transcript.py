@@ -32,6 +32,78 @@ class TranscriptBatch:
     has_more: bool
 
 
+def _session_metadata(
+    current: dict[str, Any],
+    payload: dict[str, Any],
+    timestamp: str | None,
+) -> dict[str, Any]:
+    return {
+        **current,
+        "session_id": payload.get("session_id")
+        or payload.get("id")
+        or current.get("session_id"),
+        "cwd": payload.get("cwd") or current.get("cwd"),
+        "started_at": payload.get("timestamp")
+        or timestamp
+        or current.get("started_at"),
+        "source": payload.get("source") or current.get("source"),
+        "originator": payload.get("originator") or current.get("originator"),
+        "model_provider": payload.get("model_provider")
+        or current.get("model_provider"),
+        "cli_version": payload.get("cli_version") or current.get("cli_version"),
+    }
+
+
+def _turn_metadata(
+    current: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        **current,
+        "turn_id": payload.get("turn_id") or current.get("turn_id"),
+        "model": payload.get("model") or current.get("model"),
+        "reasoning_effort": payload.get("effort")
+        or payload.get("reasoning_effort")
+        or current.get("reasoning_effort"),
+    }
+
+
+def _safe_provenance_value(value: Any, *, maximum: int = 120) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    clean, redactions = redact_text(value.strip()[:maximum])
+    if redactions:
+        return None
+    return clean if clean else None
+
+
+def _model_provenance(
+    event: dict[str, Any],
+    metadata: dict[str, Any],
+    checkpoint: dict[str, Any] | None,
+) -> dict[str, str]:
+    previous = (
+        checkpoint.get("model_provenance")
+        if isinstance(checkpoint, dict)
+        and isinstance(checkpoint.get("model_provenance"), dict)
+        else {}
+    )
+    values = {
+        "model": event.get("model")
+        or metadata.get("model")
+        or previous.get("model"),
+        "effort": metadata.get("reasoning_effort") or previous.get("effort"),
+        "provider": metadata.get("model_provider") or previous.get("provider"),
+        "harness": metadata.get("originator")
+        or metadata.get("source")
+        or previous.get("harness"),
+    }
+    return {
+        key: clean
+        for key, value in values.items()
+        if (clean := _safe_provenance_value(value)) is not None
+    }
+
+
 def _message_text(payload: dict[str, Any]) -> str:
     content = payload.get("content")
     if not isinstance(content, list):
@@ -79,12 +151,12 @@ def extract_messages(
             if not isinstance(payload, dict):
                 continue
             if event.get("type") == "session_meta":
-                metadata = {
-                    "session_id": payload.get("session_id") or payload.get("id"),
-                    "cwd": payload.get("cwd"),
-                    "started_at": payload.get("timestamp") or event.get("timestamp"),
-                    "source": payload.get("source"),
-                }
+                metadata = _session_metadata(
+                    metadata, payload, event.get("timestamp")
+                )
+                continue
+            if event.get("type") == "turn_context":
+                metadata = _turn_metadata(metadata, payload)
                 continue
             if event.get("type") != "response_item" or payload.get("type") != "message":
                 continue
@@ -212,12 +284,13 @@ def extract_message_delta(
                 cursor_end = line_end
                 continue
             if event.get("type") == "session_meta":
-                metadata = {
-                    "session_id": payload.get("session_id") or payload.get("id"),
-                    "cwd": payload.get("cwd"),
-                    "started_at": payload.get("timestamp") or event.get("timestamp"),
-                    "source": payload.get("source"),
-                }
+                metadata = _session_metadata(
+                    metadata, payload, event.get("timestamp")
+                )
+                cursor_end = line_end
+                continue
+            if event.get("type") == "turn_context":
+                metadata = _turn_metadata(metadata, payload)
                 cursor_end = line_end
                 continue
             if event.get("type") != "response_item" or payload.get("type") != "message":
@@ -414,7 +487,7 @@ def build_curation_packet(
                 "text": item["text"],
             }
         )
-    artifacts_by_path: dict[str, dict[str, str]] = {}
+    artifacts_by_path: dict[str, dict[str, Any]] = {}
     if valid_checkpoint:
         for item in checkpoint.get("artifacts", []):
             if not isinstance(item, dict):
@@ -422,11 +495,19 @@ def build_curation_packet(
             path = Path(str(item.get("path") or "")).expanduser()
             if not path.is_file():
                 continue
-            artifacts_by_path[str(path)] = {
+            artifact: dict[str, Any] = {
                 "label": str(item.get("label") or path.name)[:200],
                 "path": str(path),
                 "evidence_id": "c1",
             }
+            fingerprints = [
+                str(value)
+                for value in item.get("decision_fingerprints", [])
+                if isinstance(value, str) and value
+            ]
+            if fingerprints:
+                artifact["decision_fingerprints"] = sorted(set(fingerprints))
+            artifacts_by_path[str(path)] = artifact
     for item in extract_packet_artifacts(evidence, cwd):
         artifacts_by_path[str(item["path"])] = item
     packet = {
@@ -435,6 +516,7 @@ def build_curation_packet(
         "turn_id": event.get("turn_id"),
         "cwd": str(cwd),
         "captured_at": event.get("captured_at"),
+        "model_provenance": _model_provenance(event, metadata, checkpoint),
         "evidence": evidence,
         "artifacts": list(artifacts_by_path.values()),
         "checkpoint": {

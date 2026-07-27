@@ -12,6 +12,7 @@
     {
       "text": "Use one responsive implementation for desktop and mobile layouts.",
       "rationale": "A shared implementation keeps navigation behavior consistent.",
+      "decision_type": "implemented-choice",
       "evidence_ids": ["a1"]
     }
   ],

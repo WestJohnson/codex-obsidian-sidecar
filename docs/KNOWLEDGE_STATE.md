@@ -68,17 +68,35 @@ High-confidence session decisions are promoted to managed records under:
 ```
 
 Each record includes a deterministic project-scoped `decision_id`, status,
-freshness, source sessions, and typed targets:
+freshness, source sessions, authority, and one of five decision types:
+
+- `operator-decision`: an explicit user choice, approval, or prohibition;
+- `implemented-choice`: a choice actually applied in the work;
+- `recommendation`: advice or a research option not yet accepted;
+- `observation`: a durable fact or constraint, not a user choice;
+- `legacy-unclassified`: retained history whose original authority cannot be
+  established safely.
+
+Authority is derived separately as `operator`, `repository-evidence`, `agent`,
+`checkpoint`, or `legacy`. Only operator decisions and implemented choices are
+eligible for the active project index. Recommendations remain proposed,
+observations remain informational, and ambiguous legacy items require review.
+
+Before promotion, the Sidecar compares normalized text, token overlap, polarity,
+and numeric terms against existing project decisions. A very high-confidence
+wording variant reuses the existing record and preserves the alternate wording.
+A probable duplicate is not merged: it is marked `needs-review`, linked to its
+candidates, and listed in the project review index.
+
+Impact targets use these typed relationships:
 
 - `vault:` points to another vault note;
 - `repo:` points to a path relative to the project's source working directory;
 - `file:` preserves an external absolute artifact path and is explicitly
   nonportable.
 
-The project hub receives a managed decision index. Exact normalized decision
-text reuses the same record; fuzzy semantic merging is intentionally omitted to
-avoid silently combining different choices. Operators can explicitly maintain
-`supersedes` relationships in decision frontmatter.
+The project hub receives managed active and review indexes. Operators can
+explicitly maintain `supersedes` relationships in decision frontmatter.
 
 ## Blast-Radius Preview
 
@@ -89,8 +107,14 @@ obsidian-sidecar decision-impact DECISION_ID
 obsidian-sidecar decision-impact DECISION_ID --depth 2
 ```
 
-The command resolves direct affected targets, source records, incoming vault
-references, and explicit decision-to-decision supersession edges. It reports
+The command distinguishes:
+
+- `direct`: an artifact explicitly associated with that decision;
+- `inferred`: a conservative legacy edge retained for review;
+- `related`: project context, sources, incoming references, and explicit
+  decision-to-decision supersession edges.
+
+The direct affected count excludes related project context. The command reports
 missing or nonportable targets instead of hiding them. Depth is capped at three.
 
 This surface is read-only. It never edits a runbook, project note, session,
@@ -130,9 +154,27 @@ obsidian-sidecar knowledge-migrate --apply
 
 Apply is idempotent, local-only, lease-protected, and followed by Basic Memory
 reindexing. It adds canonical IDs and envelopes to managed project hubs,
-creates decision records from existing managed session sections, annotates
-managed runbooks, and refreshes project decision indexes. It does not alter
-session bodies or automatically merge duplicate project identities.
+creates decision records from existing managed session sections, types records
+when historical evidence still supports that classification, marks ambiguous
+or duplicate legacy records for review, converts broad legacy impact into
+inferred edges, annotates managed runbooks, refreshes project decision indexes,
+and adds current-state/open-work rollups to project hubs. It does not alter
+session bodies, silently merge decision records, or automatically merge
+duplicate project identities.
+
+## Project Hubs And Model Provenance
+
+Each managed project hub carries two generated blocks:
+
+- current state: latest phase, outcome, resume context, verification count, and
+  source session;
+- ranked open work: blockers first, followed by scheduled, monitored, and
+  accepted items, each linked to its source.
+
+Session notes also record model provenance when the Codex transcript provides
+it. The bounded fields are model, provider, reasoning effort, and harness. This
+metadata supports later quality comparisons without storing prompts, raw
+transcripts, internal reasoning, tool output, or token-level telemetry.
 
 Daily maintenance writes the human-visible summary at
 `_System/Knowledge/latest.md`. Project identity conflicts are reported for

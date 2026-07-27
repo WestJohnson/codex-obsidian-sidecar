@@ -14,6 +14,43 @@ def test_valid_grounded_curation_passes(valid_curation: dict) -> None:
     assert not result.review_required
 
 
+def test_operator_decision_requires_user_or_checkpoint_evidence(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["decisions"][0]["decision_type"] = "operator-decision"
+
+    result = validate_curation(value, packet(), minimum_confidence=0.65)
+
+    assert not result.valid
+    assert any("operator-decision lacks" in error for error in result.errors)
+
+
+def test_implemented_choice_requires_change_or_verification_evidence(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["changes"] = []
+    value["verification"] = []
+
+    result = validate_curation(value, packet(), minimum_confidence=0.65)
+
+    assert not result.valid
+    assert any("implemented-choice lacks" in error for error in result.errors)
+
+
+def test_legacy_decision_requires_checkpoint_evidence(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["decisions"][0]["decision_type"] = "legacy-unclassified"
+
+    result = validate_curation(value, packet(), minimum_confidence=0.65)
+
+    assert not result.valid
+    assert any("legacy-unclassified" in error for error in result.errors)
+
+
 def test_topic_metadata_is_stably_deduplicated_and_capped(
     valid_curation: dict,
 ) -> None:

@@ -209,9 +209,13 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
             required |= {
                 "project",
                 "decision_id",
+                "decision_type",
+                "authority",
                 "status",
                 "freshness",
+                "impact",
                 "affects",
+                "possible_duplicates",
                 "sources",
             }
             health.decision_records += 1

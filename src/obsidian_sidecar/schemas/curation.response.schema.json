@@ -74,12 +74,22 @@
       "properties": {
         "text": { "type": "string" },
         "rationale": { "type": "string" },
+        "decision_type": {
+          "type": "string",
+          "enum": [
+            "operator-decision",
+            "implemented-choice",
+            "recommendation",
+            "observation",
+            "legacy-unclassified"
+          ]
+        },
         "evidence_ids": {
           "type": "array",
           "items": { "type": "string" }
         }
       },
-      "required": ["text", "rationale", "evidence_ids"]
+      "required": ["text", "rationale", "decision_type", "evidence_ids"]
     },
     "unresolvedItem": {
       "type": "object",

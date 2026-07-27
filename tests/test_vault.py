@@ -48,11 +48,33 @@ def test_atomic_write_and_readback(
     assert metadata["project"] == "rainbow-joes"
     assert "REDACTED_SECRET" not in body
     assert "## Artifacts\n\n- None recorded." in body
+    assert "Type: `implemented-choice`" in body
     project = result.project_path.read_text(encoding="utf-8")
     assert (
         result.note_path.relative_to(settings.vault_path).with_suffix("").as_posix()
         in project
     )
+
+
+def test_session_note_records_model_provenance(
+    settings: Settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    value = packet(tmp_path)
+    value["model_provenance"] = {
+        "model": "gpt-test-model",
+        "provider": "openai",
+        "effort": "high",
+        "harness": "codex-tui",
+    }
+
+    result = write_curation(settings, valid_curation, value, review_required=False)
+
+    metadata, body = parse_frontmatter(
+        result.note_path.read_text(encoding="utf-8")
+    )
+    assert metadata["model_provenance"]["model"] == "gpt-test-model"
+    assert metadata["model_provenance"]["effort"] == "high"
+    assert "Model: `gpt-test-model` via `codex-tui` at effort `high`" in body
 
 
 def test_session_note_preserves_canonical_artifact_link(
@@ -116,6 +138,7 @@ def test_same_session_move_retargets_canonical_references(
         {
             "text": "Keep the follow-up under the new project identity.",
             "rationale": "The later capture uses the reviewed project name.",
+            "decision_type": "implemented-choice",
             "evidence_ids": ["a1"],
         }
     ]

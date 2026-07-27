@@ -232,6 +232,13 @@ def validate_curation(
         for item in packet.get("evidence", [])
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    implemented_evidence = {
+        str(value)
+        for source_field in ("changes", "verification")
+        for source_item in curation.get(source_field, [])
+        if isinstance(source_item, dict)
+        for value in source_item.get("evidence_ids", [])
+    }
     for field in ("decisions", "changes", "verification", "unresolved", "next_actions"):
         values = curation.get(field, [])
         if not isinstance(values, list):
@@ -249,6 +256,31 @@ def validate_curation(
                 if evidence_id not in allowed_evidence:
                     errors.append(
                         f"{field}[{index}] cites unknown evidence id {evidence_id}"
+                    )
+            if field == "decisions":
+                decision_type = str(item.get("decision_type") or "")
+                evidence_ids = {
+                    str(value) for value in item.get("evidence_ids", [])
+                }
+                if (
+                    decision_type == "operator-decision"
+                    and not any(value.startswith("u") for value in evidence_ids)
+                    and "c1" not in evidence_ids
+                ):
+                    errors.append(
+                        f"decisions[{index}] operator-decision lacks user or checkpoint evidence"
+                    )
+                if (
+                    decision_type == "implemented-choice"
+                    and not (evidence_ids & implemented_evidence)
+                    and "c1" not in evidence_ids
+                ):
+                    errors.append(
+                        f"decisions[{index}] implemented-choice lacks change, verification, or checkpoint evidence"
+                    )
+                if decision_type == "legacy-unclassified" and "c1" not in evidence_ids:
+                    errors.append(
+                        f"decisions[{index}] legacy-unclassified is only valid for checkpoint evidence"
                     )
 
     errors.extend(_chronology_errors(curation, packet))

@@ -32,6 +32,13 @@ Quality rules:
 - Use no more than 12 unique lowercase hyphenated topics.
 - Set current_phase to a concise state such as research, implementation, verification, blocked, or complete.
 - Set resume_context to the exact useful point from which a later session should continue.
+- Classify every decision by authority and outcome:
+  - operator-decision only when the user explicitly chose, approved, required, or prohibited it; cite user evidence;
+  - implemented-choice only when the choice was actually applied, not merely proposed;
+  - recommendation for research findings, options, or agent advice that the user has not accepted;
+  - observation for durable facts or constraints that are not choices;
+  - legacy-unclassified only when retaining a checkpoint item that cannot be classified safely.
+- Never turn a recommendation, comparison winner, or research conclusion into an active operator decision without explicit user evidence.
 - Classify each unresolved item as blocker, scheduled, monitor, accepted, or dropped.
 - Confidence means confidence that the note accurately reflects the supplied evidence.
 - Evidence is chronological in packet order. Newer evidence overrides older findings.

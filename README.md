@@ -60,9 +60,18 @@ use `$obsidian-sidecar-setup`. See [Installation](docs/INSTALL.md).
   missing local artifact targets are quarantined.
 - Canonical project hubs, decision records, and runbooks carry freshness
   envelopes whose current state is computed from verification and review dates.
-- Significant high-confidence decisions become deterministic records under
-  `40 Decisions`; impact previews are read-only and never rewrite downstream
+- Significant decisions become deterministic records under `40 Decisions`,
+  typed as operator decisions, implemented choices, recommendations,
+  observations, or legacy items whose authority is not yet known.
+- Similar decisions are checked before promotion. High-confidence wording
+  variants reuse one record; probable duplicates remain visible for review.
+- Impact previews separate direct artifact effects, inferred legacy edges, and
+  related project context. They are read-only and never rewrite downstream
   notes or repository artifacts.
+- Project hubs surface the latest outcome, phase, resume context, and ranked
+  open work without requiring a session-note search.
+- Session notes retain lightweight model, provider, effort, and harness
+  provenance when Codex exposes it.
 - Canonical local file links are preserved deterministically.
 - Notes use atomic writes and stable session-derived paths.
 - Checkpoints advance only after a validated skip or successful vault write,
@@ -129,7 +138,7 @@ cannot masquerade as a working installation.
 
 ## Status
 
-Version `0.5.1` is a production candidate, not a hosted service. Before a
+Version `0.6.0` is a production candidate, not a hosted service. Before a
 public release, configure the repository, GitHub release environment, and PyPI
 Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
 `update-check` reports `not-published` and exact offline wheel installation is

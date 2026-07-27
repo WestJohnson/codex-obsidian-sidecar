@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,6 +51,7 @@ def _decision_curation(valid_curation: dict) -> dict:
         {
             "text": "Use checksummed offline wheels for Sidecar updates.",
             "rationale": "This keeps exact-version installation reproducible.",
+            "decision_type": "operator-decision",
             "evidence_ids": ["u1"],
         }
     ]
@@ -93,6 +95,9 @@ def test_session_write_adds_freshness_and_canonical_decision(
     )
     assert decision_metadata["type"] == "decision"
     assert decision_metadata["decision_id"].startswith("rainbow-joes/")
+    assert decision_metadata["decision_type"] == "operator-decision"
+    assert decision_metadata["authority"] == "operator"
+    assert decision_metadata["status"] == "active"
     assert "repo:docs/updates.md" in decision_metadata["affects"]
     assert decision_metadata["freshness"]["verified_at"].startswith("2026-07-20")
     assert "operator approval" in decision_body
@@ -209,9 +214,11 @@ def test_decision_impact_is_read_only(
     after = {path: path.read_bytes() for path in settings.vault_path.rglob("*.md")}
     assert preview["status"] == "ok"
     assert preview["read_only"] is True
-    assert preview["blast_radius"]["affected_count"] == 1
+    assert preview["blast_radius"]["affected_count"] == 0
+    assert preview["blast_radius"]["direct"] == []
     assert any(
-        item["relationship"] == "affects" for item in preview["blast_radius"]["direct"]
+        item["relationship"] == "related-context"
+        for item in preview["blast_radius"]["related"]
     )
     assert before == after
 
@@ -273,13 +280,20 @@ managed_by: codex-obsidian-sidecar
     repeated = migrate_knowledge(settings, apply=True)
 
     assert plan["mutates"] is False
+    assert plan["schema"] == 2
+    assert plan["project_hubs_to_update"] == 1
     assert plan["decision_records_new"] == 1
     assert applied["decision_records_created"] == 1
     project_metadata, _ = parse_frontmatter(project.read_text(encoding="utf-8"))
     assert project_metadata["canonical_id"] == "project:legacy"
     assert project_metadata["freshness"]["verified_at"].startswith("2026-07-19")
     decision_id = decision_id_for("legacy", "Keep the canonical legacy workflow.")
-    assert preview_decision_impact(settings, decision_id)["status"] == "ok"
+    preview = preview_decision_impact(settings, decision_id)
+    assert preview["status"] == "ok"
+    assert preview["decision"]["decision_type"] == "operator-decision"
+    assert preview["decision"]["authority"] == "operator"
+    assert "SIDECAR:CURRENT-STATE:START" in project.read_text(encoding="utf-8")
+    assert "SIDECAR:OPEN-WORK:START" in project.read_text(encoding="utf-8")
     assert repeated["decision_records_created"] == 0
     assert repeated["decision_records_updated"] == 0
 
@@ -375,3 +389,217 @@ managed_by: codex-obsidian-sidecar
     assert first["projects_updated"] == 1
     assert second["projects_updated"] == 0
     assert project.read_bytes() == first_payload
+    metadata, body = parse_frontmatter(project.read_text(encoding="utf-8"))
+    assert metadata["current_state"]["phase"] == "no-session-history"
+    assert metadata["current_state"]["open_items"] == 0
+    assert "No managed session has been captured." in body
+
+
+def test_high_confidence_duplicate_reuses_record_and_probable_duplicate_waits_for_review(
+    settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    repo = tmp_path / "rainbow-joes"
+    repo.mkdir()
+    first = write_curation(
+        settings,
+        _decision_curation(valid_curation),
+        _packet(repo, session_id="decision-first"),
+        review_required=False,
+    )
+    paraphrase = _decision_curation(valid_curation)
+    paraphrase["decisions"][0][
+        "text"
+    ] = "Use checksummed offline wheels for reproducible Sidecar updates."
+    second = write_curation(
+        settings,
+        paraphrase,
+        _packet(repo, session_id="decision-paraphrase"),
+        review_required=False,
+    )
+    probable = _decision_curation(valid_curation)
+    probable["decisions"][0][
+        "text"
+    ] = "Use checksummed wheel files when installing Sidecar updates offline."
+    third = write_curation(
+        settings,
+        probable,
+        _packet(repo, session_id="decision-probable"),
+        review_required=False,
+    )
+
+    assert second.decision_paths == first.decision_paths
+    assert len(third.decision_paths) == 1
+    assert third.decision_paths[0] != first.decision_paths[0]
+    metadata, _ = parse_frontmatter(
+        third.decision_paths[0].read_text(encoding="utf-8")
+    )
+    assert metadata["status"] == "needs-review"
+    assert metadata["possible_duplicates"][0]["decision_id"].startswith(
+        "rainbow-joes/"
+    )
+    project_text = third.project_path.read_text(encoding="utf-8")
+    assert "## Decision Proposals and Reviews" in project_text
+    assert third.decision_paths[0].stem in project_text
+
+
+def test_checkpoint_artifact_fingerprints_keep_direct_blast_radius_narrow(
+    settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    repo = tmp_path / "rainbow-joes"
+    repo.mkdir()
+    first_artifact = repo / "first.md"
+    second_artifact = repo / "second.md"
+    first_artifact.write_text("# First\n", encoding="utf-8")
+    second_artifact.write_text("# Second\n", encoding="utf-8")
+    first_text = "Use the first artifact for deployment checks."
+    second_text = "Use the second artifact for rollback checks."
+
+    def fingerprint(value: str) -> str:
+        normalized = " ".join(value.strip().casefold().split())
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    curation = deepcopy(valid_curation)
+    curation["decisions"] = [
+        {
+            "text": first_text,
+            "rationale": "It records deployment evidence.",
+            "decision_type": "implemented-choice",
+            "evidence_ids": ["c1"],
+        },
+        {
+            "text": second_text,
+            "rationale": "It records rollback evidence.",
+            "decision_type": "implemented-choice",
+            "evidence_ids": ["c1"],
+        },
+    ]
+    packet = _packet(repo, session_id="narrow-impact")
+    packet["evidence"].append(
+        {
+            "id": "c1",
+            "kind": "checkpoint",
+            "text": "Previously validated state.",
+        }
+    )
+    packet["artifacts"] = [
+        {
+            "label": "First",
+            "path": str(first_artifact),
+            "evidence_id": "c1",
+            "decision_fingerprints": [fingerprint(first_text)],
+        },
+        {
+            "label": "Second",
+            "path": str(second_artifact),
+            "evidence_id": "c1",
+            "decision_fingerprints": [fingerprint(second_text)],
+        },
+    ]
+
+    result = write_curation(settings, curation, packet, review_required=False)
+
+    impacts = []
+    for path in result.decision_paths:
+        metadata, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        impacts.append(metadata["impact"])
+    assert sorted(len(item["direct"]) for item in impacts) == [1, 1]
+    assert all(
+        "10 Projects/rainbow-joes/Project.md" not in target
+        for item in impacts
+        for target in item["direct"]
+    )
+    assert all(len(item["related"]) == 1 for item in impacts)
+
+
+def test_project_hub_surfaces_current_state_and_ranked_open_work(
+    settings, valid_curation: dict, tmp_path: Path
+) -> None:
+    repo = tmp_path / "rainbow-joes"
+    repo.mkdir()
+
+    result = write_curation(
+        settings,
+        valid_curation,
+        _packet(repo, session_id="project-state"),
+        review_required=False,
+    )
+
+    metadata, body = parse_frontmatter(
+        result.project_path.read_text(encoding="utf-8")
+    )
+    assert metadata["current_state"]["phase"] == "verification"
+    assert metadata["current_state"]["open_items"] == 2
+    assert metadata["current_state"]["blockers"] == 0
+    assert "**Latest outcome:** The landing page" in body
+    assert "## Ranked Open Work" in body
+    assert "Production deployment remains pending." in body
+    assert "Review and approve the production deployment." in body
+
+
+def test_migration_conservatively_backfills_orphan_legacy_decision(
+    settings,
+) -> None:
+    ensure_vault_layout(settings.vault_path)
+    project = settings.vault_path / "10 Projects/orphan/Project.md"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(
+        """---
+title: Orphan
+type: project
+project: orphan
+status: active
+source_cwd: /tmp/orphan
+managed_by: codex-obsidian-sidecar
+---
+
+# Orphan
+""",
+        encoding="utf-8",
+    )
+    decision = settings.vault_path / "40 Decisions/orphan/orphan-choice.md"
+    decision.parent.mkdir(parents=True, exist_ok=True)
+    decision.write_text(
+        """---
+title: Retain the orphan choice
+type: decision
+decision_id: orphan/orphan-choice
+project: orphan
+status: active
+created: '2026-07-01T00:00:00+00:00'
+updated: '2026-07-01T00:00:00+00:00'
+managed_by: codex-obsidian-sidecar
+affects:
+  - vault:10 Projects/orphan/Project.md
+sources: []
+supersedes: []
+---
+
+# Retain the orphan choice
+
+## Decision
+
+Retain the orphan choice.
+
+## Rationale
+
+No evidence survives to establish who authorized it.
+""",
+        encoding="utf-8",
+    )
+
+    first = migrate_knowledge(settings, apply=True)
+    second = migrate_knowledge(settings, apply=True)
+
+    metadata, body = parse_frontmatter(decision.read_text(encoding="utf-8"))
+    assert first["decision_records_updated"] == 1
+    assert second["decision_records_updated"] == 0
+    assert metadata["decision_type"] == "legacy-unclassified"
+    assert metadata["authority"] == "legacy"
+    assert metadata["status"] == "needs-review"
+    assert metadata["impact"]["direct"] == []
+    assert metadata["impact"]["inferred"] == []
+    assert metadata["impact"]["related"] == [
+        "vault:10 Projects/orphan/Project.md"
+    ]
+    assert "## Duplicate Review" in body
+    assert not inspect_vault(settings).missing_required_fields

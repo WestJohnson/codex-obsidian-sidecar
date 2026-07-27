@@ -352,3 +352,69 @@ def test_hook_cutoff_excludes_an_in_progress_future_turn(
     assert "still in progress" not in json.dumps(completed["evidence"])
     assert not completed["checkpoint"]["has_more"]
     assert "still in progress" in json.dumps(later["evidence"])
+
+
+def test_packet_records_lightweight_model_provenance(tmp_path: Path) -> None:
+    transcript = tmp_path / "provenance.jsonl"
+    events = [
+        {
+            "timestamp": "2026-07-25T20:00:00Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "provenance-session",
+                "cwd": str(tmp_path),
+                "source": "cli",
+                "originator": "codex-tui",
+                "model_provider": "openai",
+            },
+        },
+        {
+            "timestamp": "2026-07-25T20:00:01Z",
+            "type": "turn_context",
+            "payload": {
+                "turn_id": "turn-provenance",
+                "model": "gpt-test-model",
+                "effort": "high",
+            },
+        },
+        {
+            "timestamp": "2026-07-25T20:00:02Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Record this work."}],
+            },
+        },
+        {
+            "timestamp": "2026-07-25T20:00:03Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Work recorded."}],
+            },
+        },
+    ]
+    transcript.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+    packet = build_curation_packet(
+        {
+            "session_id": "provenance-session",
+            "turn_id": "turn-provenance",
+            "transcript_path": str(transcript),
+            "cwd": str(tmp_path),
+            "captured_at": "2026-07-25T20:00:03Z",
+        }
+    )
+
+    assert packet["model_provenance"] == {
+        "model": "gpt-test-model",
+        "effort": "high",
+        "provider": "openai",
+        "harness": "codex-tui",
+    }
