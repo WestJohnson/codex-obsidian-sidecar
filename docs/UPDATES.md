@@ -49,7 +49,7 @@ credentials.
    protected default branch; do not tag an extracted release bundle.
 2. Update `pyproject.toml`, `src/obsidian_sidecar/__init__.py`, and
    `CHANGELOG.md` to the same version.
-3. Run `python scripts/export_release.py`.
+3. Run `uv run python scripts/export_release.py`.
 4. Verify every generated artifact with `SHA256SUMS`.
 5. Push a signed `vX.Y.Z` tag after review. CI rejects a tag that does not
    match the package version.

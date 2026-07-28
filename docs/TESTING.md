@@ -64,7 +64,7 @@ coverage grows.
 After building the release, run:
 
 ```sh
-python scripts/smoke_release.py
+uv run python scripts/smoke_release.py
 ```
 
 The smoke test creates an isolated home directory and Python 3.11 environment,
@@ -119,8 +119,8 @@ under the live vault's `_System` directory.
 
 1. Run the deterministic suite.
 2. Build the wheel, source distribution, agent bundle, release manifest, and
-   checksums with `python scripts/export_release.py`.
-3. Run `python scripts/smoke_release.py` against Python 3.11.
+   checksums with `uv run python scripts/export_release.py`.
+3. Run `uv run python scripts/smoke_release.py` against Python 3.11.
 4. Install with `uv tool install --force --no-cache --python 3.13 .`.
 5. Run the benchmark twice to detect state leakage and timing flakes.
 6. Run one real Codex turn and confirm `hook: Stop Completed`.
