@@ -30,4 +30,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv run --extra dev pytest
-      - run: uvx ruff check src tests
+      - run: uv run --extra dev ruff check src tests

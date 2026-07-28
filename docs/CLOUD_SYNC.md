@@ -248,7 +248,7 @@ Run local tests first, then deploy and verify:
 ```sh
 cd ~/Documents/codex-obsidian-sidecar
 .venv/bin/pytest -q
-uvx ruff check src tests
+uv run --extra dev ruff check src tests
 python scripts/export_release.py
 cd release
 shasum -a 256 -c SHA256SUMS
