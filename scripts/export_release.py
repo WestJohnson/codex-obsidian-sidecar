@@ -165,7 +165,10 @@ def export(*, skip_tests: bool = False) -> dict[str, object]:
         "artifacts": entries,
         "agent_bundle": bundle.name,
         "update": {
-            "metadata": "https://pypi.org/pypi/codex-obsidian-sidecar/json",
+            "metadata": (
+                "https://ai.westhawaiimarketing.com/charmfile/releases/"
+                "sidecar/index.json"
+            ),
             "apply": "obsidian-sidecar update --yes",
             "automatic_apply": False,
         },
@@ -173,7 +176,7 @@ def export(*, skip_tests: bool = False) -> dict[str, object]:
             "secret_scan": "passed",
             "sha256sums": checksums.name,
             "github_attestation_required_for_public_release": True,
-            "pypi_trusted_publishing_required": True,
+            "self_hosted_https_release_required": True,
         },
     }
     (RELEASE / "release-manifest.json").write_text(

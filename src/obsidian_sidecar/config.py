@@ -8,6 +8,9 @@ from typing import Any
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "codex-obsidian-sidecar" / "config.json"
+DEFAULT_UPDATE_INDEX_URL = (
+    "https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/index.json"
+)
 
 
 @dataclass(frozen=True)
@@ -55,7 +58,7 @@ class Settings:
     service_label: str = "io.github.codex-obsidian-sidecar"
     update_checks_enabled: bool = False
     update_check_interval_seconds: int = 86_400
-    update_index_url: str = "https://pypi.org/pypi/codex-obsidian-sidecar/json"
+    update_index_url: str = DEFAULT_UPDATE_INDEX_URL
 
     @property
     def queue_dir(self) -> Path:
@@ -200,7 +203,7 @@ def load_settings(path: Path | None = None) -> Settings:
         update_index_url=str(
             raw.get(
                 "update_index_url",
-                "https://pypi.org/pypi/codex-obsidian-sidecar/json",
+                DEFAULT_UPDATE_INDEX_URL,
             )
         ).strip(),
     )

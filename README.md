@@ -26,7 +26,14 @@ memory.
 Install an exact public release:
 
 ```sh
-uv tool install 'codex-obsidian-sidecar==VERSION'
+SIDECAR_VERSION=0.6.0
+SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
+SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
+mkdir -p artifacts
+curl -fLo "artifacts/$SIDECAR_WHEEL" "$SIDECAR_RELEASE/artifacts/$SIDECAR_WHEEL"
+curl -fLO "$SIDECAR_RELEASE/SHA256SUMS"
+grep "artifacts/$SIDECAR_WHEEL$" SHA256SUMS | shasum -a 256 -c -
+uv tool install "./artifacts/$SIDECAR_WHEEL"
 obsidian-sidecar preflight
 ```
 
@@ -138,8 +145,9 @@ cannot masquerade as a working installation.
 
 ## Status
 
-Version `0.6.0` is a production candidate, not a hosted service. Before a
-public release, configure the repository, GitHub release environment, and PyPI
-Trusted Publisher described in [Updates](docs/UPDATES.md). Until publication,
-`update-check` reports `not-published` and exact offline wheel installation is
-the supported update path.
+Version `0.6.0` uses the self-hosted Charmfile release channel. Source,
+checksummed artifacts, and update metadata are served from
+`ai.westhawaiimarketing.com`; GitHub remains a public mirror and
+build-provenance surface. The updater never mutates automatically and refuses
+an update unless both the target wheel and the exact rollback wheel are
+available and hash-verified.

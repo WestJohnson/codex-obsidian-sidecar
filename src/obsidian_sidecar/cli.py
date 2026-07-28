@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .config import load_settings
+from .config import DEFAULT_UPDATE_INDEX_URL, load_settings
 from .curator import StaticCurator
 from .queueing import capture_hook
 from .worker import daemon_once, process_ready, run_maintenance
@@ -45,7 +45,7 @@ def _parser() -> argparse.ArgumentParser:
         "verify-install", help="verify configured hooks, services, and retrieval"
     )
     update_check = subparsers.add_parser(
-        "update-check", help="check the configured package index for a release"
+        "update-check", help="check the configured release channel for an update"
     )
     update_check.add_argument("--index-url")
     update = subparsers.add_parser(
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         index_url = args.index_url
         if index_url is None and selected.exists():
             index_url = load_settings(selected).update_index_url
-        index_url = index_url or "https://pypi.org/pypi/codex-obsidian-sidecar/json"
+        index_url = index_url or DEFAULT_UPDATE_INDEX_URL
         try:
             result = check_update(index_url)
             if args.command == "update":

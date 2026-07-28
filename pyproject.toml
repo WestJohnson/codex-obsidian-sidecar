@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/WestJohnson/codex-obsidian-sidecar"
-Repository = "https://github.com/WestJohnson/codex-obsidian-sidecar"
+Homepage = "https://ai.westhawaiimarketing.com/charmfile/"
+Repository = "https://ai.westhawaiimarketing.com/charmfile/git/codex-obsidian-sidecar.git"
 Issues = "https://github.com/WestJohnson/codex-obsidian-sidecar/issues"
 
 [project.optional-dependencies]

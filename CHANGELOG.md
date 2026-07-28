@@ -2,6 +2,9 @@
 
 ## 0.6.0 - 2026-07-26
 
+- Replaced PyPI publication and package-index mutation with a self-hosted HTTPS
+  release channel, exact wheel hashes, same-origin artifact enforcement, and a
+  verified rollback wheel fetched before mutation.
 - Typed canonical records as operator decisions, implemented choices,
   recommendations, observations, or legacy-unclassified items, with
   evidence-derived authority and promotion status.

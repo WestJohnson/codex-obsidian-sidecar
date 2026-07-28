@@ -22,7 +22,7 @@
   "service_label": "io.github.codex-obsidian-sidecar",
   "update_checks_enabled": true,
   "update_check_interval_seconds": 86400,
-  "update_index_url": "https://pypi.org/pypi/codex-obsidian-sidecar/json",
+  "update_index_url": "https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/index.json",
   "integrations": {
     "codex_hook": true,
     "background_service": true,

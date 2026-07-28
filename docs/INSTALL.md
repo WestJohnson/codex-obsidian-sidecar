@@ -33,7 +33,14 @@ the package performs all configuration writes and verification.
 Install an exact release:
 
 ```sh
-uv tool install 'codex-obsidian-sidecar==VERSION'
+SIDECAR_VERSION=0.6.0
+SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
+SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
+mkdir -p artifacts
+curl -fLo "artifacts/$SIDECAR_WHEEL" "$SIDECAR_RELEASE/artifacts/$SIDECAR_WHEEL"
+curl -fLO "$SIDECAR_RELEASE/SHA256SUMS"
+grep "artifacts/$SIDECAR_WHEEL$" SHA256SUMS | shasum -a 256 -c -
+uv tool install "./artifacts/$SIDECAR_WHEEL"
 ```
 
 Inspect the machine:

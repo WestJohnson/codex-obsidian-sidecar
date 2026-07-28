@@ -17,6 +17,7 @@ from typing import Any
 
 from .config import (
     DEFAULT_CONFIG_PATH,
+    DEFAULT_UPDATE_INDEX_URL,
     Settings,
     config_path as resolved_config_path,
     load_settings,
@@ -398,7 +399,7 @@ def _config_bytes(options: SetupOptions) -> bytes:
             "service_label": options.service_label,
             "update_checks_enabled": options.enable_update_checks,
             "update_check_interval_seconds": 86_400,
-            "update_index_url": "https://pypi.org/pypi/codex-obsidian-sidecar/json",
+            "update_index_url": DEFAULT_UPDATE_INDEX_URL,
             "integrations": {
                 "codex_hook": options.install_codex_hook,
                 "background_service": options.install_service,

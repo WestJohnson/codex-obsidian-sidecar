@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,7 +21,7 @@ from .vault import _atomic_write
 
 
 PACKAGE_NAME = "codex-obsidian-sidecar"
-PYPI_SIMPLE_INDEX = "https://pypi.org/simple"
+MAX_ARTIFACT_BYTES = 100_000_000
 
 
 def _validate_index_url(url: str) -> None:
@@ -48,6 +50,59 @@ def _fetch_json(url: str, timeout: int = 15) -> dict[str, Any]:
     return value
 
 
+def _wheel_artifact(
+    metadata: dict[str, Any],
+    version: Version,
+    *,
+    index_url: str,
+    required: bool,
+) -> dict[str, Any] | None:
+    releases = metadata.get("releases", {})
+    files = releases.get(str(version), []) if isinstance(releases, dict) else []
+    index_origin = urlparse(index_url)
+    candidates: list[dict[str, Any]] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        filename = item.get("filename")
+        url = item.get("url")
+        digests = item.get("digests")
+        if (
+            not isinstance(filename, str)
+            or not filename.endswith(".whl")
+            or not isinstance(url, str)
+            or not isinstance(digests, dict)
+        ):
+            continue
+        sha256 = digests.get("sha256")
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in sha256)
+        ):
+            continue
+        _validate_index_url(url)
+        artifact_origin = urlparse(url)
+        if artifact_origin.netloc != index_origin.netloc:
+            raise ValueError("Release artifact URL must use the metadata origin")
+        size = item.get("size")
+        candidates.append(
+            {
+                "filename": filename,
+                "url": url,
+                "sha256": sha256.lower(),
+                "size": int(size) if isinstance(size, int) and size >= 0 else None,
+            }
+        )
+    if len(candidates) > 1:
+        raise ValueError(f"Release {version} contains multiple wheel artifacts")
+    if candidates:
+        return candidates[0]
+    if required:
+        raise ValueError(f"Release {version} does not contain a verified wheel URL")
+    return None
+
+
 def check_update(
     index_url: str,
     *,
@@ -69,10 +124,14 @@ def check_update(
             "latest_version": None,
             "update_available": False,
             "release_hashes": [],
-            "install_method": "offline-wheel-until-published",
+            "artifact": None,
+            "rollback_artifact": None,
+            "install_method": "self-hosted-wheel-until-published",
             "automatic_apply": False,
             "status": "not-published",
         }
+    if value.get("schema") != 1 or value.get("package") != PACKAGE_NAME:
+        raise ValueError("Update metadata has an invalid schema or package")
     info = value.get("info")
     if not isinstance(info, dict) or not isinstance(info.get("version"), str):
         raise ValueError("Update metadata does not contain info.version")
@@ -81,16 +140,17 @@ def check_update(
         latest = Version(info["version"])
     except InvalidVersion as error:
         raise ValueError("Update metadata contains an invalid version") from error
-    releases = value.get("releases", {})
-    files = releases.get(str(latest), []) if isinstance(releases, dict) else []
-    hashes = sorted(
-        {
-            str(item.get("digests", {}).get("sha256"))
-            for item in files
-            if isinstance(item, dict)
-            and isinstance(item.get("digests"), dict)
-            and item.get("digests", {}).get("sha256")
-        }
+    artifact = _wheel_artifact(
+        value,
+        latest,
+        index_url=index_url,
+        required=True,
+    )
+    rollback_artifact = _wheel_artifact(
+        value,
+        current,
+        index_url=index_url,
+        required=False,
     )
     return {
         "schema": 1,
@@ -100,10 +160,49 @@ def check_update(
         "current_version": str(current),
         "latest_version": str(latest),
         "update_available": latest > current,
-        "release_hashes": hashes,
-        "install_method": "uv-tool-exact-version",
+        "release_hashes": [artifact["sha256"]],
+        "artifact": artifact,
+        "rollback_artifact": rollback_artifact,
+        "install_method": "self-hosted-verified-wheel",
         "automatic_apply": False,
     }
+
+
+def _download_artifact(
+    artifact: dict[str, Any],
+    directory: Path,
+    *,
+    timeout: int = 60,
+) -> Path:
+    url = str(artifact.get("url", ""))
+    filename = str(artifact.get("filename", ""))
+    expected = str(artifact.get("sha256", "")).lower()
+    _validate_index_url(url)
+    if not filename.endswith(".whl") or Path(filename).name != filename:
+        raise ValueError("Release artifact filename must be a wheel basename")
+    if len(expected) != 64 or any(
+        character not in "0123456789abcdef" for character in expected
+    ):
+        raise ValueError("Release artifact requires an exact SHA-256 digest")
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": f"codex-obsidian-sidecar/{__version__}",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:  # noqa: S310 - HTTPS checked
+        if response.status != 200:
+            raise RuntimeError(f"Release artifact returned HTTP {response.status}")
+        payload = response.read(MAX_ARTIFACT_BYTES + 1)
+    if len(payload) > MAX_ARTIFACT_BYTES:
+        raise ValueError("Release artifact exceeds the maximum supported size")
+    actual = hashlib.sha256(payload).hexdigest()
+    if actual != expected:
+        raise ValueError("Release artifact SHA-256 verification failed")
+    target = directory / filename
+    target.write_bytes(payload)
+    return target
 
 
 def apply_update(
@@ -111,6 +210,7 @@ def apply_update(
     *,
     executable: Path | None = None,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    downloader: Callable[[dict[str, Any], Path], Path] | None = None,
 ) -> dict[str, Any]:
     if update.get("status") == "not-published":
         return update
@@ -130,48 +230,50 @@ def apply_update(
     if executable is None and not discovered:
         raise FileNotFoundError("obsidian-sidecar executable is not on PATH")
     binary = executable or Path(str(discovered))
-    command = [
-        uv,
-        "tool",
-        "install",
-        "--force",
-        "--default-index",
-        PYPI_SIMPLE_INDEX,
-        f"{PACKAGE_NAME}=={latest}",
-    ]
-    result = runner(
-        command,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=300,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"uv update failed: {result.stderr.strip()[:800]}")
-    verified = runner(
-        [str(binary), "--version"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if verified.returncode == 0 and latest in verified.stdout:
-        return {**update, "status": "updated", "verified_version": latest}
-    rollback = runner(
-        [
-            uv,
-            "tool",
-            "install",
-            "--force",
-            "--default-index",
-            PYPI_SIMPLE_INDEX,
-            f"{PACKAGE_NAME}=={current}",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=300,
-    )
+    artifact = update.get("artifact")
+    rollback_artifact = update.get("rollback_artifact")
+    if not isinstance(artifact, dict):
+        raise ValueError("Update metadata is missing the verified release artifact")
+    if not isinstance(rollback_artifact, dict):
+        raise ValueError(
+            "Refusing update because no verified rollback artifact is available"
+        )
+    fetch = downloader or _download_artifact
+    with tempfile.TemporaryDirectory(prefix="obsidian-sidecar-update-") as temp_name:
+        directory = Path(temp_name)
+        release_wheel = fetch(artifact, directory)
+        rollback_wheel = fetch(rollback_artifact, directory)
+        result = runner(
+            [uv, "tool", "install", "--force", str(release_wheel)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"uv update failed: {result.stderr.strip()[:800]}")
+        verified = runner(
+            [str(binary), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if verified.returncode == 0 and latest in verified.stdout:
+            return {**update, "status": "updated", "verified_version": latest}
+        rollback = runner(
+            [
+                uv,
+                "tool",
+                "install",
+                "--force",
+                str(rollback_wheel),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=300,
+        )
     raise RuntimeError(
         "Updated executable failed version verification; rollback "
         + ("succeeded" if rollback.returncode == 0 else "failed")
