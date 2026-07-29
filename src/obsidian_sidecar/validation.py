@@ -193,14 +193,51 @@ def load_schema() -> dict[str, Any]:
 
 
 def normalize_curation_metadata(curation: dict[str, Any]) -> dict[str, Any]:
-    """Normalize bounded, non-semantic metadata without masking invalid output."""
+    """Normalize safe bounded output without masking unsupported overflow.
+
+    Checkpoint-only items are a working-set cache. When a curator returns more
+    items than the durable schema permits, discard only the oldest items whose
+    sole evidence is ``c1``. Current-turn evidence is never truncated, and an
+    overflow without enough checkpoint-only items remains invalid.
+    """
 
     normalized = dict(curation)
+    schema = load_schema()
+    for field in (
+        "decisions",
+        "changes",
+        "verification",
+        "unresolved",
+        "next_actions",
+    ):
+        values = curation.get(field)
+        if not isinstance(values, list):
+            continue
+        maximum = int(schema["properties"][field]["maxItems"])
+        excess = len(values) - maximum
+        if excess <= 0:
+            continue
+        compacted: list[Any] = []
+        remaining = excess
+        for item in values:
+            evidence_ids = item.get("evidence_ids") if isinstance(item, dict) else None
+            checkpoint_only = (
+                isinstance(evidence_ids, list)
+                and bool(evidence_ids)
+                and set(evidence_ids) == {"c1"}
+            )
+            if remaining and checkpoint_only:
+                remaining -= 1
+                continue
+            compacted.append(item)
+        if remaining == 0:
+            normalized[field] = compacted
+
     topics = curation.get("topics")
     if not isinstance(topics, list):
         return normalized
 
-    topic_schema = load_schema()["properties"]["topics"]
+    topic_schema = schema["properties"]["topics"]
     item_schema = topic_schema["items"]
     if not all(Draft202012Validator(item_schema).is_valid(topic) for topic in topics):
         return normalized

@@ -33,7 +33,7 @@ the package performs all configuration writes and verification.
 Install an exact release:
 
 ```sh
-SIDECAR_VERSION=0.6.0
+SIDECAR_VERSION=0.6.1
 SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
 SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
 mkdir -p artifacts

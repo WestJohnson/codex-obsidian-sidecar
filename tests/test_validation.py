@@ -77,7 +77,7 @@ def test_invalid_topic_metadata_is_not_hidden_by_normalization(
     assert not result.valid
 
 
-def test_metadata_normalization_never_truncates_semantic_lists(
+def test_metadata_normalization_never_truncates_current_evidence(
     valid_curation: dict,
 ) -> None:
     value = deepcopy(valid_curation)
@@ -91,6 +91,63 @@ def test_metadata_normalization_never_truncates_semantic_lists(
 
     assert len(normalized["changes"]) == 31
     assert not result.valid
+
+
+def test_metadata_normalization_compacts_only_checkpoint_carry_forward(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["decisions"] = [
+        {
+            "text": f"Retained checkpoint decision {index}",
+            "rationale": "Previously validated durable state.",
+            "decision_type": "legacy-unclassified",
+            "evidence_ids": ["c1"],
+        }
+        for index in range(20)
+    ]
+    value["decisions"].append(
+        {
+            "text": "Use deterministic checkpoint compaction.",
+            "rationale": "The current turn implemented the bounded recovery.",
+            "decision_type": "operator-decision",
+            "evidence_ids": ["u1"],
+        }
+    )
+    evidence = {
+        "evidence": [{"id": "c1"}, {"id": "u1"}, {"id": "a1"}],
+    }
+
+    normalized = normalize_curation_metadata(value)
+
+    assert len(normalized["decisions"]) == 20
+    assert normalized["decisions"][0]["text"] == "Retained checkpoint decision 1"
+    assert normalized["decisions"][-1]["evidence_ids"] == ["u1"]
+    assert validate_curation(
+        normalized, evidence, minimum_confidence=0.65
+    ).valid
+
+
+def test_metadata_normalization_does_not_hide_unrecoverable_mixed_overflow(
+    valid_curation: dict,
+) -> None:
+    value = deepcopy(valid_curation)
+    value["decisions"] = [
+        {
+            "text": f"Current decision {index}",
+            "rationale": "Current evidence.",
+            "decision_type": "operator-decision",
+            "evidence_ids": ["u1"],
+        }
+        for index in range(21)
+    ]
+
+    normalized = normalize_curation_metadata(value)
+
+    assert normalized["decisions"] == value["decisions"]
+    assert not validate_curation(
+        normalized, packet(), minimum_confidence=0.65
+    ).valid
 
 
 def test_unknown_evidence_fails(valid_curation: dict) -> None:

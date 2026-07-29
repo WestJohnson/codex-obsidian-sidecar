@@ -32,6 +32,9 @@ SECRET_PATTERNS = (
     re.compile(rb"(?:ghp|github_pat)_[A-Za-z0-9_]{24,}"),
     re.compile(rb"AIza[A-Za-z0-9_-]{30,}"),
     re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(rb"/Users/[A-Za-z0-9._-]+/"),
+    re.compile(rb"(?i)\bpersonal-vps\b"),
+    re.compile(rb"(?i)\bvultr1\b"),
 )
 
 
@@ -174,6 +177,7 @@ def export(*, skip_tests: bool = False) -> dict[str, object]:
         },
         "security": {
             "secret_scan": "passed",
+            "personal_data_scan": "passed",
             "sha256sums": checksums.name,
             "github_attestation_required_for_public_release": True,
             "self_hosted_https_release_required": True,

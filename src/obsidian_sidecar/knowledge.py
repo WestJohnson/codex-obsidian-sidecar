@@ -402,9 +402,22 @@ def assess_freshness(
     if invalid:
         state = "invalid"
         detail = "; ".join(invalid)
-    elif metadata.get("status") == "superseded":
-        state = "superseded"
-        detail = "decision is superseded"
+    elif note_type == "decision" and metadata.get("status") in {
+        "superseded",
+        "rejected",
+    }:
+        state = str(metadata["status"])
+        detail = f"decision is {state}"
+    elif note_type == "decision" and metadata.get("status") in {
+        "proposed",
+        "needs-review",
+        "informational",
+    }:
+        state = "non-authoritative"
+        detail = (
+            f"decision status {metadata['status']} is retained for optional "
+            "discovery and does not require freshness maintenance"
+        )
     elif review_after and _utc(now or datetime.now(UTC)) > review_after:
         state = "review-due"
         detail = f"review was due {review_after.isoformat()}"

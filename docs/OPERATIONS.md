@@ -55,6 +55,12 @@ deltas are processed in bounded chunks and immediately requeued. Missing,
 stale, or corrupt checkpoints fall back to a bounded recovery packet instead
 of blocking capture.
 
+If a curator still echoes too many retained items, the worker automatically
+discards only the oldest `c1`-only carry-forward entries until the output fits
+the durable schema. Items grounded in the current turn are never truncated.
+The process result reports the number in `checkpoint_items_compacted`; the full
+canonical history remains in the vault.
+
 Numeric token and packet-size telemetry is appended to
 `curator-usage.jsonl`; no prompt or response text is logged. Set
 `"curator_usage_logging": false` to disable it. The reversible feature flag

@@ -54,6 +54,7 @@ source detection, plan-first knowledge migration, alert deduplication,
 incremental checkpoint creation and seeding, append-only transcript cursors,
 completed-hook cutoffs, bounded delta continuation, failure-safe cursor
 advancement, compact checkpoint evidence, hourly Git checkpoints, cloud
+carry-forward self-compaction, non-authoritative decision aging, cloud
 transaction idempotency, transactional setup, hook preservation, installer
 idempotency, HTTPS-only update metadata, exact-version updates, hook-path
 migration, and rollback. Pytest's collected count is the source of truth as

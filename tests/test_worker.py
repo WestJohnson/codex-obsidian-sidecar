@@ -83,6 +83,107 @@ def test_worker_normalizes_safe_topic_metadata_before_validation(
     ]
 
 
+def test_worker_self_compacts_saturated_checkpoint_output(
+    settings: Settings,
+    transcript_path: Path,
+    valid_curation: dict,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+    )
+    base_event = {
+        "session_id": "fixture-session-001",
+        "turn_id": "turn-initial",
+        "transcript_path": str(transcript_path),
+        "cwd": str(tmp_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, base_event)
+    first = process_ready(
+        settings, force=True, curator=StaticCurator(valid_curation)
+    )
+    assert first.failed == 0
+    with transcript_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:00Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Keep checkpoint recovery automatic.",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+        handle.write(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-14T08:02:01Z",
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Implemented and verified automatic recovery.",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+    curation = deepcopy(valid_curation)
+    curation["decisions"] = [
+        {
+            "text": f"Retained checkpoint decision {index}",
+            "rationale": "Previously validated durable state.",
+            "decision_type": "legacy-unclassified",
+            "evidence_ids": ["c1"],
+        }
+        for index in range(20)
+    ]
+    curation["decisions"].append(
+        {
+            "text": "Keep checkpoint recovery automatic.",
+            "rationale": "The user explicitly requested automatic recovery.",
+            "decision_type": "operator-decision",
+            "evidence_ids": ["u1"],
+        }
+    )
+    enqueue_event(
+        settings,
+        {
+            **base_event,
+            "turn_id": "turn-saturated",
+            "captured_at": "2026-07-14T08:03:00Z",
+        },
+    )
+
+    result = process_ready(settings, force=True, curator=StaticCurator(curation))
+
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert result.failed == 0
+    assert result.notes_written == 1
+    assert result.checkpoint_items_compacted == 1
+    assert not list(settings.failed_dir.glob("*.json"))
+    assert checkpoint is not None
+    assert len(checkpoint["curation"]["decisions"]) == 20
+    assert checkpoint["curation"]["decisions"][-1]["evidence_ids"] == ["u1"]
+
+
 def test_worker_reconciles_only_failed_events_covered_by_a_committed_cursor(
     settings: Settings,
     transcript_path: Path,

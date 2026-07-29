@@ -21,6 +21,13 @@ the entire growing transcript on every curation pass. Checkpoints never enter
 the vault or Basic Memory index and never retain raw tool output, internal
 reasoning, developer instructions, or full transcripts.
 
+The checkpoint supplied to the curator is a recent bounded working set. If the
+curator still returns more items than the durable schema permits, the worker
+deterministically removes only the oldest items supported solely by checkpoint
+evidence (`c1`). Current-turn evidence is never truncated. Canonical decision
+records and prior session history remain in the vault, so recovery is automatic
+without deleting durable knowledge.
+
 ## Freshness Envelope
 
 A freshness-bearing note uses structured frontmatter:
@@ -47,7 +54,9 @@ compute one of these states at read time:
 - `review-due`: the review date has passed;
 - `unknown`: no envelope exists;
 - `invalid`: the envelope does not satisfy the contract;
-- `superseded`: a decision is explicitly superseded.
+- `superseded` or `rejected`: a decision is explicitly retired;
+- `non-authoritative`: a proposal, observation, or ambiguous candidate retained
+  for optional discovery rather than required maintenance.
 
 Default review windows are 30 days for project hubs, 90 days for decisions,
 and 14 days for runbooks or operational instructions. They are configurable as
@@ -86,7 +95,10 @@ Before promotion, the Sidecar compares normalized text, token overlap, polarity,
 and numeric terms against existing project decisions. A very high-confidence
 wording variant reuses the existing record and preserves the alternate wording.
 A probable duplicate is not merged: it is marked `needs-review`, linked to its
-candidates, and listed in the project review index.
+candidates, and listed in the project review index. Recommendations,
+informational records, and `needs-review` candidates remain searchable but do
+not age into freshness warnings or reduce the health score. Only active and
+provisional decisions are part of required decision maintenance.
 
 Impact targets use these typed relationships:
 

@@ -26,7 +26,7 @@ memory.
 Install an exact public release:
 
 ```sh
-SIDECAR_VERSION=0.6.0
+SIDECAR_VERSION=0.6.1
 SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
 SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
 mkdir -p artifacts
@@ -71,7 +71,8 @@ use `$obsidian-sidecar-setup`. See [Installation](docs/INSTALL.md).
   typed as operator decisions, implemented choices, recommendations,
   observations, or legacy items whose authority is not yet known.
 - Similar decisions are checked before promotion. High-confidence wording
-  variants reuse one record; probable duplicates remain visible for review.
+  variants reuse one record; probable duplicates remain searchable in a
+  non-authoritative inbox and do not create required health maintenance.
 - Impact previews separate direct artifact effects, inferred legacy edges, and
   related project context. They are read-only and never rewrite downstream
   notes or repository artifacts.
@@ -145,7 +146,7 @@ cannot masquerade as a working installation.
 
 ## Status
 
-Version `0.6.0` uses the self-hosted Charmfile release channel. Source,
+Version `0.6.1` uses the self-hosted Charmfile release channel. Source,
 checksummed artifacts, and update metadata are served from
 `ai.westhawaiimarketing.com`; GitHub remains a public mirror and
 build-provenance surface. The updater never mutates automatically and refuses

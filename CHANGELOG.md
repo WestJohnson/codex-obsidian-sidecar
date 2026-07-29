@@ -1,14 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.6.1 - 2026-07-28
 
 - Bounded long-thread checkpoint evidence to a recent working set so saturated
   decision lists retain durable vault history while reserving capacity for new
   turns.
+- Added deterministic output compaction that removes only the oldest
+  checkpoint-only carry-forward items when a curator exceeds a schema list
+  limit. Current-turn evidence is never truncated, so saturated long threads
+  recover without retries or operator cleanup.
 - Clarified curator list limits and added regression coverage for checkpoint
   compaction after the 20-decision ceiling is reached.
 - Excluded superseded and rejected decisions from duplicate detection and
   migration counts so resolved review records do not re-enter the review queue.
+- Classified recommendations, informational records, and ambiguous duplicate
+  candidates as non-authoritative freshness state. They remain searchable but
+  never age into a health penalty or required maintenance backlog.
 
 ## 0.6.0 - 2026-07-26
 

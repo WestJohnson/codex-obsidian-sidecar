@@ -44,6 +44,7 @@ class ProcessSummary:
     failed: int = 0
     processed_events: int = 0
     reconciled_failed_events: int = 0
+    checkpoint_items_compacted: int = 0
     checkpoint_updates: int = 0
     checkpoint_chunks_pending: int = 0
     note_paths: list[str] | None = None
@@ -237,8 +238,23 @@ def process_ready(
                             settings.checkpoint_max_evidence_chars
                         ),
                     )
-                    curation = normalize_curation_metadata(
-                        active_curator.curate(packet)
+                    raw_curation = active_curator.curate(packet)
+                    curation = normalize_curation_metadata(raw_curation)
+                    summary.checkpoint_items_compacted += sum(
+                        max(
+                            0,
+                            len(raw_curation.get(field, []))
+                            - len(curation.get(field, [])),
+                        )
+                        for field in (
+                            "decisions",
+                            "changes",
+                            "verification",
+                            "unresolved",
+                            "next_actions",
+                        )
+                        if isinstance(raw_curation.get(field), list)
+                        and isinstance(curation.get(field), list)
                     )
                     validation = validate_curation(
                         curation,

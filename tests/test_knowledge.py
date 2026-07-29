@@ -194,6 +194,52 @@ def test_freshness_states_are_computed_not_persisted(settings, tmp_path: Path) -
     assert "status:" not in path.read_text(encoding="utf-8")
 
 
+def test_non_authoritative_decision_backlog_never_becomes_health_maintenance(
+    settings, tmp_path: Path
+) -> None:
+    source = settings.vault_path / "session.md"
+    source.write_text("# Source\n", encoding="utf-8")
+    now = datetime(2026, 7, 29, tzinfo=UTC)
+    for index, status in enumerate(("proposed", "needs-review", "informational")):
+        path = settings.vault_path / f"40 Decisions/example/decision-{index}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "title": f"Optional decision {index}",
+            "type": "decision",
+            "project": "example",
+            "decision_id": f"example/decision-{index}",
+            "decision_type": "recommendation",
+            "authority": "agent",
+            "status": status,
+            "managed_by": "codex-obsidian-sidecar",
+            "freshness": {
+                "class": "project",
+                "observed_at": "2025-01-01T00:00:00+00:00",
+                "review_after": "2025-04-01T00:00:00+00:00",
+                "source": "vault:session.md",
+            },
+            "impact": {"direct": [], "inferred": [], "related": []},
+            "affects": [],
+            "possible_duplicates": [],
+            "sources": ["vault:session.md"],
+        }
+        path.write_text(
+            f"---\n{yaml.safe_dump(metadata, sort_keys=False).strip()}\n---\n"
+            f"# Optional decision {index}\n",
+            encoding="utf-8",
+        )
+        finding = assess_freshness(
+            path, settings.vault_path, metadata, now=now
+        )
+        assert finding is not None
+        assert finding.state == "non-authoritative"
+
+    health = inspect_vault(settings, create_layout=False)
+    assert health.freshness_review_due == []
+    assert health.critical_failures == 0
+    assert health.warnings == 0
+
+
 def test_decision_impact_is_read_only(
     settings, valid_curation: dict, tmp_path: Path
 ) -> None:

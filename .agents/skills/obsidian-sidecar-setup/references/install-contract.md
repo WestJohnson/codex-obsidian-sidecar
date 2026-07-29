@@ -12,10 +12,17 @@ workflow and is disabled by default.
 
 ## Install A Release
 
-From PyPI after public release:
+From the self-hosted release channel:
 
 ```sh
-uv tool install 'codex-obsidian-sidecar==VERSION'
+SIDECAR_VERSION=0.6.1
+SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
+SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
+mkdir -p artifacts
+curl -fLo "artifacts/$SIDECAR_WHEEL" "$SIDECAR_RELEASE/artifacts/$SIDECAR_WHEEL"
+curl -fLO "$SIDECAR_RELEASE/SHA256SUMS"
+grep "artifacts/$SIDECAR_WHEEL$" SHA256SUMS | shasum -a 256 -c -
+uv tool install "./artifacts/$SIDECAR_WHEEL"
 ```
 
 From an offline export:
@@ -107,5 +114,7 @@ obsidian-sidecar update-check
 obsidian-sidecar update --yes
 ```
 
-The check is read-only. Apply uses an exact version through `uv`, verifies the
-installed CLI version, and attempts an exact-version rollback on failure.
+The check is read-only. Apply downloads the exact target and rollback wheels
+from the same self-hosted HTTPS origin, verifies their SHA-256 hashes before
+mutation, installs through `uv`, verifies the CLI version, and restores the
+prior wheel on failure.
