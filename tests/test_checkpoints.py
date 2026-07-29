@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import stat
 from pathlib import Path
 
@@ -40,6 +42,46 @@ def test_checkpoint_round_trip_is_private_and_strips_stale_evidence(
     assert "Use one responsive implementation" in evidence
     assert "evidence_ids" not in evidence
     assert '"a1"' not in evidence
+
+
+def test_checkpoint_evidence_keeps_recent_working_set_and_reserves_capacity() -> None:
+    checkpoint = {
+        "version": 1,
+        "updated_at": "2026-07-29T00:00:00Z",
+        "curation": {
+            "title": "Long-running thread",
+            "decisions": [
+                {
+                    "text": f"Decision {index}",
+                    "decision_type": "operator-decision",
+                    "evidence_ids": ["c1"],
+                }
+                for index in range(20)
+            ],
+            "unresolved": [
+                {
+                    "text": f"Unresolved {index}",
+                    "disposition": "scheduled",
+                    "evidence_ids": ["c1"],
+                }
+                for index in range(12)
+            ],
+            "next_actions": [],
+            "verification": [],
+            "changes": [],
+        },
+    }
+
+    evidence = checkpoint_evidence(checkpoint, maximum_chars=20_000)
+    compact = json.loads(evidence)
+
+    assert [item["text"] for item in compact["decisions"]] == [
+        f"Decision {index}" for index in range(8, 20)
+    ]
+    assert [item["text"] for item in compact["unresolved"]] == [
+        f"Unresolved {index}" for index in range(4, 12)
+    ]
+    assert all("evidence_ids" not in item for item in compact["decisions"])
 
 
 def test_corrupt_checkpoint_falls_back_without_raising(settings) -> None:

@@ -45,6 +45,7 @@ Quality rules:
 - Remove resolved items from unresolved and next_actions. Never preserve a stale gap after later evidence reports it fixed, completed, passed, or verified.
 - Preserve only claims that are internally consistent. A completed outcome and an unresolved claim about the same work must not coexist.
 - When c1 is present, it is the previously validated session checkpoint. Return a complete updated record, cite c1 for retained facts, and keep unchanged decision wording exact so canonical identities remain stable.
+- Treat c1 as a recent working set rather than the complete archive. Keep at most 20 decisions, 20 unresolved items, 20 next actions, 30 changes, and 30 verification items; prefer current evidence and the most recent still-relevant checkpoint items when a list would exceed its limit.
 - Artifact links are maintained deterministically by the sidecar; do not rewrite or invent file links.
 
 Return only the JSON object required by the output schema.

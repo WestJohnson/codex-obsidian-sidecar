@@ -21,6 +21,13 @@ CURATION_LIST_FIELDS = (
     "verification",
     "changes",
 )
+CHECKPOINT_LIST_LIMITS = {
+    "decisions": 12,
+    "unresolved": 8,
+    "next_actions": 8,
+    "verification": 8,
+    "changes": 8,
+}
 
 
 def _decision_fingerprint(text: str) -> str:
@@ -220,7 +227,12 @@ def checkpoint_evidence(
         values = source.get(field, [])
         if not isinstance(values, list):
             continue
-        for item in values:
+        # A checkpoint is a recent working set, not the durable archive. Keep
+        # the newest bounded items so the next curator response has room for
+        # current-turn evidence instead of repeatedly exceeding schema limits
+        # in long threads. Canonical history remains in the vault.
+        limit = CHECKPOINT_LIST_LIMITS[field]
+        for item in values[-limit:]:
             if not isinstance(item, dict):
                 continue
             candidate = _strip_evidence(item)

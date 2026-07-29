@@ -749,6 +749,8 @@ def _duplicate_candidates(
     for path, metadata, existing_statement, rationale in records:
         if exclude is not None and path == exclude:
             continue
+        if str(metadata.get("status") or "") in TERMINAL_DECISION_STATUSES:
+            continue
         similarity = _decision_similarity(statement, existing_statement)
         if not similarity.review:
             continue
@@ -1739,7 +1741,11 @@ def migration_plan(settings: Settings) -> dict[str, Any]:
             decisions_with_legacy_impact += 1
         project = str(metadata.get("project") or path.parent.name)
         statement = _decision_body_value(body, "Decision")
-        if statement:
+        if (
+            statement
+            and str(metadata.get("status") or "")
+            not in TERMINAL_DECISION_STATUSES
+        ):
             decision_records.setdefault(project, []).append((decision_id, statement))
     for records in decision_records.values():
         for index, (left_id, left) in enumerate(records):
@@ -1826,7 +1832,12 @@ def _backfill_decision_records(settings: Settings) -> set[Path]:
             project_target = (
                 "vault:" + project_path.relative_to(settings.vault_path).as_posix()
             )
-            candidates = _duplicate_candidates(records, statement, exclude=path)
+            existing_status = str(existing.get("status") or "")
+            candidates = (
+                []
+                if existing_status in TERMINAL_DECISION_STATUSES
+                else _duplicate_candidates(records, statement, exclude=path)
+            )
             possible_duplicates = [
                 {
                     "decision_id": str(item["metadata"].get("decision_id") or ""),
@@ -1843,7 +1854,6 @@ def _backfill_decision_records(settings: Settings) -> set[Path]:
             authority = str(existing.get("authority") or "legacy")
             if authority not in DECISION_AUTHORITY_RANK:
                 authority = "legacy"
-            existing_status = str(existing.get("status") or "")
             status = (
                 existing_status
                 if existing_status in TERMINAL_DECISION_STATUSES

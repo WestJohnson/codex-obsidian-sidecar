@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Bounded long-thread checkpoint evidence to a recent working set so saturated
+  decision lists retain durable vault history while reserving capacity for new
+  turns.
+- Clarified curator list limits and added regression coverage for checkpoint
+  compaction after the 20-decision ceiling is reached.
+- Excluded superseded and rejected decisions from duplicate detection and
+  migration counts so resolved review records do not re-enter the review queue.
+
 ## 0.6.0 - 2026-07-26
 
 - Replaced PyPI publication and package-index mutation with a self-hosted HTTPS

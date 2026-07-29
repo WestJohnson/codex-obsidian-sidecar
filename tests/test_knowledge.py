@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from obsidian_sidecar.knowledge import (
+    _duplicate_candidates,
     assess_freshness,
     decision_id_for,
     migrate_knowledge,
@@ -440,6 +441,25 @@ def test_high_confidence_duplicate_reuses_record_and_probable_duplicate_waits_fo
     project_text = third.project_path.read_text(encoding="utf-8")
     assert "## Decision Proposals and Reviews" in project_text
     assert third.decision_paths[0].stem in project_text
+
+
+def test_terminal_decisions_do_not_trigger_duplicate_review(tmp_path: Path) -> None:
+    statement = "Use checksummed wheel files for offline Sidecar updates."
+    terminal = (
+        tmp_path / "retired.md",
+        {"decision_id": "example/retired", "status": "superseded"},
+        "Use checksummed offline wheels for reproducible Sidecar updates.",
+        "Retired in favor of a canonical record.",
+    )
+    active = (
+        tmp_path / "active.md",
+        {"decision_id": "example/active", "status": "active"},
+        "Use signed archives for production Sidecar releases.",
+        "This is a distinct release requirement.",
+    )
+
+    assert _duplicate_candidates([terminal], statement) == []
+    assert _duplicate_candidates([terminal, active], statement) == []
 
 
 def test_checkpoint_artifact_fingerprints_keep_direct_blast_radius_narrow(
