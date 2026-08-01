@@ -35,7 +35,7 @@ Issues = "https://github.com/WestJohnson/codex-obsidian-sidecar/issues"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.3,<9",
-  "pytest-cov>=6,<7",
+  "pytest-cov>=7.1.0,<8",
   "ruff==0.15.22",
 ]
 
