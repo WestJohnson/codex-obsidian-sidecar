@@ -5,6 +5,7 @@ import os
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -80,6 +81,68 @@ def _run(
     return subprocess.run(
         command, capture_output=True, text=True, check=False, timeout=timeout, cwd=cwd
     )
+
+
+def _find_obsidian_cli() -> str | None:
+    discovered = shutil.which("obsidian")
+    if discovered:
+        return discovered
+    homebrew = Path("/opt/homebrew/bin/obsidian")
+    if homebrew.is_file():
+        return str(homebrew)
+    return None
+
+
+def _background_service_health(settings: Settings) -> str:
+    if sys.platform == "darwin":
+        result = _run(
+            [
+                "launchctl",
+                "print",
+                f"gui/{os.getuid()}/{settings.service_label}",
+            ],
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "last exit code = 0" in result.stdout
+        return "launchd last exited cleanly"
+
+    if sys.platform.startswith("linux"):
+        systemctl = shutil.which("systemctl")
+        assert systemctl, "systemctl is required for Linux background health"
+        timer = f"{settings.service_label}.timer"
+        enabled = _run(
+            [systemctl, "--user", "is-enabled", timer],
+            timeout=20,
+        )
+        assert enabled.returncode == 0, enabled.stderr or enabled.stdout
+        active = _run(
+            [systemctl, "--user", "is-active", timer],
+            timeout=20,
+        )
+        assert active.returncode == 0, active.stderr or active.stdout
+        service = _run(
+            [
+                systemctl,
+                "--user",
+                "show",
+                f"{settings.service_label}.service",
+                "--property=Result",
+                "--property=ExecMainStatus",
+            ],
+            timeout=20,
+        )
+        assert service.returncode == 0, service.stderr
+        properties = dict(
+            line.split("=", 1) for line in service.stdout.splitlines() if "=" in line
+        )
+        assert properties.get("Result") == "success", properties
+        assert properties.get("ExecMainStatus") == "0", properties
+        return (
+            "systemd timer is enabled and active, and the service last exited cleanly"
+        )
+
+    raise RuntimeError(f"unsupported service manager on {sys.platform}")
 
 
 @contextmanager
@@ -325,10 +388,16 @@ def run_benchmark(settings: Settings) -> dict:
                 fixture.write_text(
                     f"# Obsidian CLI E2E\n\n{marker}\n", encoding="utf-8"
                 )
+            obsidian = _find_obsidian_cli()
+            if obsidian is None:
+                return (
+                    "Official Obsidian CLI is not installed; this optional integration "
+                    "was skipped and Basic Memory covers live retrieval."
+                )
             time.sleep(1)
             result = _run(
                 [
-                    "/opt/homebrew/bin/obsidian",
+                    obsidian,
                     f"vault={settings.vault_path.name}",
                     "search",
                     f"query={marker}",
@@ -432,17 +501,10 @@ def run_benchmark(settings: Settings) -> dict:
             assert hook.get("enabled") is True
             assert hook.get("trustStatus") == "trusted", hook.get("trustStatus")
 
-            launchd = _run(
-                [
-                    "launchctl",
-                    "print",
-                    f"gui/{os.getuid()}/{settings.service_label}",
-                ],
-                timeout=20,
+            service_health = _background_service_health(settings)
+            return (
+                f"The installed Stop hook is enabled and trusted, and {service_health}."
             )
-            assert launchd.returncode == 0, launchd.stderr
-            assert "last exit code = 0" in launchd.stdout
-            return "The installed Stop hook is enabled and trusted, and launchd last exited cleanly."
 
         record("installed-integration-health", 5, True, installed_integration)
 
