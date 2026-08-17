@@ -129,6 +129,8 @@ def _background_service_health(settings: Settings) -> str:
                 f"{settings.service_label}.service",
                 "--property=Result",
                 "--property=ExecMainStatus",
+                "--property=ExecMainCode",
+                "--property=ExecMainStartTimestamp",
             ],
             timeout=20,
         )
@@ -138,6 +140,9 @@ def _background_service_health(settings: Settings) -> str:
         )
         assert properties.get("Result") == "success", properties
         assert properties.get("ExecMainStatus") == "0", properties
+        assert properties.get("ExecMainCode") == "exited", properties
+        started = (properties.get("ExecMainStartTimestamp") or "").strip()
+        assert started and started.casefold() not in {"", "n/a"}, properties
         return (
             "systemd timer is enabled and active, and the service last exited cleanly"
         )
@@ -390,9 +395,13 @@ def run_benchmark(settings: Settings) -> dict:
                 )
             obsidian = _find_obsidian_cli()
             if obsidian is None:
-                return (
-                    "Official Obsidian CLI is not installed; this optional integration "
-                    "was skipped and Basic Memory covers live retrieval."
+                if sys.platform.startswith("linux"):
+                    return (
+                        "Official Obsidian CLI is not installed on Linux; this optional "
+                        "integration was skipped and Basic Memory covers live retrieval."
+                    )
+                raise AssertionError(
+                    "Official Obsidian CLI is required for macOS acceptance and was not found"
                 )
             time.sleep(1)
             result = _run(

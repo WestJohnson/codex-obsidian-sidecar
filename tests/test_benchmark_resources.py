@@ -26,9 +26,7 @@ def test_find_obsidian_cli_prefers_path_lookup(monkeypatch) -> None:
     assert _find_obsidian_cli() == "/usr/bin/obsidian"
 
 
-def test_find_obsidian_cli_allows_optional_integration_to_be_absent(
-    monkeypatch,
-) -> None:
+def test_find_obsidian_cli_returns_none_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(benchmark.shutil, "which", lambda name: None)
     monkeypatch.setattr(benchmark.Path, "is_file", lambda self: False)
 
@@ -51,7 +49,17 @@ def test_background_service_health_uses_systemd_on_linux(
             return CompletedProcess(command, 0, "enabled\n", "")
         if "is-active" in command:
             return CompletedProcess(command, 0, "active\n", "")
-        return CompletedProcess(command, 0, "Result=success\nExecMainStatus=0\n", "")
+        return CompletedProcess(
+            command,
+            0,
+            (
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                "ExecMainCode=exited\n"
+                "ExecMainStartTimestamp=Mon 2026-08-17 12:00:00 UTC\n"
+            ),
+            "",
+        )
 
     monkeypatch.setattr(benchmark.sys, "platform", "linux")
     monkeypatch.setattr(benchmark.shutil, "which", lambda name: "/usr/bin/systemctl")
@@ -80,5 +88,37 @@ def test_background_service_health_uses_systemd_on_linux(
             f"{settings.service_label}.service",
             "--property=Result",
             "--property=ExecMainStatus",
+            "--property=ExecMainCode",
+            "--property=ExecMainStartTimestamp",
         ],
     ]
+
+
+def test_background_service_health_rejects_never_run_linux_service(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = Settings(
+        vault_path=tmp_path / "vault",
+        state_dir=tmp_path / "state",
+        codex_bin=Path("/bin/false"),
+    )
+
+    def fake_run(command: list[str], **kwargs) -> CompletedProcess[str]:
+        if "is-enabled" in command or "is-active" in command:
+            return CompletedProcess(command, 0, "active\n", "")
+        return CompletedProcess(
+            command,
+            0,
+            "Result=success\nExecMainStatus=0\nExecMainCode=\nExecMainStartTimestamp=\n",
+            "",
+        )
+
+    monkeypatch.setattr(benchmark.sys, "platform", "linux")
+    monkeypatch.setattr(benchmark.shutil, "which", lambda name: "/usr/bin/systemctl")
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+
+    try:
+        _background_service_health(settings)
+    except AssertionError:
+        return
+    raise AssertionError("never-run systemd service should fail health check")
