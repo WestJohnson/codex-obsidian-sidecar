@@ -165,10 +165,10 @@ obsidian-sidecar knowledge-migrate --apply
 ```
 
 Apply is idempotent, local-only, lease-protected, and followed by Basic Memory
-reindexing. It adds canonical IDs and envelopes to managed project hubs,
-creates decision records from existing managed session sections, types records
-when historical evidence still supports that classification, marks ambiguous
-or duplicate legacy records for review, converts broad legacy impact into
+incremental indexing. It adds canonical IDs and envelopes to managed project
+hubs, creates decision records from existing managed session sections, types
+records when historical evidence still supports that classification, marks
+ambiguous or duplicate legacy records for review, converts broad legacy impact into
 inferred edges, annotates managed runbooks, refreshes project decision indexes,
 and adds current-state/open-work rollups to project hubs. It does not alter
 session bodies, silently merge decision records, or automatically merge

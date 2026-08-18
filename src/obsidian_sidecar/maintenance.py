@@ -162,12 +162,31 @@ def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
     binary = basic_memory_binary()
     if not binary:
         return "unavailable"
-    command = [binary, "reindex", "--project", settings.basic_memory_project]
     if full:
-        command.extend(["--full", "--search"])
+        command = [
+            binary,
+            "reindex",
+            "--project",
+            settings.basic_memory_project,
+            "--full",
+            "--search",
+        ]
+        timeout = 240
+    else:
+        command = [
+            binary,
+            "status",
+            "--project",
+            settings.basic_memory_project,
+            "--wait",
+            "--timeout",
+            "90",
+            "--json",
+        ]
+        timeout = 120
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=240, check=False
+            command, capture_output=True, text=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unavailable"

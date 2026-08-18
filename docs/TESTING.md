@@ -22,9 +22,9 @@ untrusted hook, unavailable retrieval layer, or failed live curation path.
 | Quarantine path | 5 | No | Invalid output is isolated safely. |
 | Vault doctor detection | 6 | No | Broken links and secrets reduce health. |
 | Git backup snapshot | 4 | No | A restorable local commit is created. |
-| Obsidian CLI search | 5 | Yes | Obsidian finds a newly written note. |
-| Basic Memory retrieval | 10 | Yes | Lexical and hybrid searches find a fixture. |
-| Installed integration health | 5 | Yes | Stop hook is trusted and launchd is clean. |
+| Obsidian CLI search | 5 | Yes | On macOS, Obsidian finds a newly written note. On Linux without the official CLI, the case still passes and Basic Memory covers live retrieval. |
+| Basic Memory retrieval | 10 | Yes | Incremental indexing settles, then lexical and hybrid searches find a fixture. |
+| Installed integration health | 5 | Yes | Stop hook is trusted, and the platform service manager is clean: launchd on macOS, or an enabled active user-systemd timer whose service last exited cleanly on Linux. |
 | Live Luna curation | 15 | Yes | Luna returns locally valid grounded output. |
 | Live complete pipeline | 10 | Yes | Capture through write, private checkpoint, and doctor succeeds. |
 
@@ -111,10 +111,11 @@ Run:
 obsidian-sidecar benchmark
 ```
 
-The command uses the installed Codex, Luna model, official Obsidian CLI, Basic
-Memory index, global hook configuration, launchd job, and a temporary vault for
-destructive cases. Search fixtures and the latest benchmark report are written
-under the live vault's `_System` directory.
+The command uses the installed Codex, Luna model, Basic Memory index, global
+hook configuration, platform background service, and a temporary vault for
+destructive cases. The official Obsidian CLI is required on macOS and optional
+on Linux. Search fixtures and the latest benchmark report are written under the
+live vault's `_System` directory.
 
 ## Release Checklist
 
@@ -129,5 +130,6 @@ under the live vault's `_System` directory.
    Memory.
 8. Run `doctor --backup` and require a score of at least 80 with zero critical
    failures.
-9. Kickstart the background service and require a clean exit.
+9. Kickstart the background service and require a clean exit: launchd on macOS,
+   or the user-systemd timer and service on Linux.
 10. Verify release checksums, artifact secret scan, and build provenance.

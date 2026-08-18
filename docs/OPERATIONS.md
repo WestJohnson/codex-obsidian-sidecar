@@ -5,8 +5,9 @@
 1. Codex runs the trusted global `Stop` hook from `~/.codex/hooks.json`.
 2. The hook writes only event metadata to
    `~/.local/share/codex-obsidian-sidecar/queue/` and always exits zero.
-3. The configured `service_label` runs once per minute through launchd and
-   waits for the configured debounce window.
+3. The configured `service_label` runs once per minute through the platform
+   service manager (launchd on macOS, user-systemd on Linux) and waits for the
+   configured debounce window.
 4. The worker loads the session's last validated private checkpoint and reads
    only newly appended user messages and final answers from the Codex
    transcript, stopping at the newest completed hook event so an in-progress
@@ -75,7 +76,14 @@ SIDECAR_SERVICE_LABEL="$(jq -r .service_label "$SIDECAR_CONFIG_PATH")"
 SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host "$SIDECAR_CONFIG_PATH")"
 obsidian-sidecar doctor --backup
 obsidian-sidecar benchmark
+# macOS
 launchctl print "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
+# Linux
+systemctl --user is-enabled "${SIDECAR_SERVICE_LABEL}.timer"
+systemctl --user is-active "${SIDECAR_SERVICE_LABEL}.timer"
+systemctl --user show "${SIDECAR_SERVICE_LABEL}.service" \
+  --property=Result --property=ExecMainStatus \
+  --property=ExecMainCode --property=ExecMainStartTimestamp
 obsidian-sidecar cloud-doctor
 obsidian-sidecar alert-status
 ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
@@ -85,7 +93,10 @@ Healthy results are:
 
 - doctor score at least 80, with zero critical failures;
 - benchmark score at least 80, with no failed critical gate;
-- launchd `last exit code = 0`;
+- background service clean on the host platform: launchd `last exit code = 0`
+  on macOS, or an enabled active user-systemd timer whose service reports
+  `Result=success`, `ExecMainStatus=0`, normal-exit `ExecMainCode=1`, and a real
+  `ExecMainStartTimestamp` on Linux;
 - no files in `~/.local/share/codex-obsidian-sidecar/failed/`.
 - cloud benchmark score at least 80 with every critical gate passing.
 - no `/var/lib/obsidian-cloud/maintenance.failed` marker on the VPS.
@@ -140,9 +151,10 @@ fresh Codex CLI, run `/hooks`, review the Stop hook, and trust its current
 definition. The benchmark's `installed-integration-health` case detects a
 modified or untrusted hook.
 
-The official Obsidian CLI must remain enabled in Obsidian under Settings,
-General, Advanced. Basic Memory uses the local `codex-vault` project. Neither
-integration stores an API key in this project.
+When the official Obsidian CLI is installed, keep it enabled in Obsidian under
+Settings, General, Advanced. macOS live acceptance requires that CLI; Linux may
+rely on Basic Memory alone for live retrieval. Basic Memory uses the local
+`codex-vault` project. Neither integration stores an API key in this project.
 
 Syncthing is the only vault synchronization authority. Obsidian's built-in
 Sync core plugin is disabled and has no local sync configuration. Do not enable
@@ -161,10 +173,15 @@ Reload the worker:
 ```sh
 SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
 SIDECAR_SERVICE_LABEL="$(jq -r .service_label "$SIDECAR_CONFIG_PATH")"
+# macOS
 SIDECAR_PLIST_PATH=~/Library/LaunchAgents/"${SIDECAR_SERVICE_LABEL}.plist"
 launchctl bootout "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 launchctl bootstrap "gui/$(id -u)" "$SIDECAR_PLIST_PATH"
 launchctl kickstart -k "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
+# Linux
+systemctl --user daemon-reload
+systemctl --user restart "${SIDECAR_SERVICE_LABEL}.timer"
+systemctl --user start --wait "${SIDECAR_SERVICE_LABEL}.service"
 ```
 
 Hook events without a usable transcript path are skipped before queueing, and
@@ -203,8 +220,8 @@ obsidian-sidecar benchmark
 ```
 
 Use `--no-cache` during local development so `uv` cannot reuse an older wheel
-with the same version. After installation, kickstart launchd and confirm a
-clean exit before considering the update complete.
+with the same version. After installation, kickstart the platform background
+service and confirm a clean exit before considering the update complete.
 
 Cloud deployment, overnight task format, sync recovery, and backup restoration
 are documented in [Cloud Sync](CLOUD_SYNC.md).

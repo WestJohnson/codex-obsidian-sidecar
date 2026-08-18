@@ -9,7 +9,9 @@ require root, a public server, or an API key for local operation.
 - an existing Obsidian vault;
 - authenticated Codex CLI with access to the configured curation model;
 - `uv`;
-- optional Obsidian CLI and Basic Memory CLI.
+- Basic Memory CLI when retrieval integration is selected;
+- official Obsidian CLI for macOS live acceptance; optional on Linux, where
+  Basic Memory covers live retrieval (see [Testing](TESTING.md)).
 
 Windows can run the package and worker manually, but the production installer
 does not create a Windows scheduler task.

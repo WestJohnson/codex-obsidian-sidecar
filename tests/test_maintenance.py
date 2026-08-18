@@ -1,11 +1,14 @@
-from pathlib import Path
 from dataclasses import replace
+from pathlib import Path
+from subprocess import CompletedProcess
 
+from obsidian_sidecar import maintenance
 from obsidian_sidecar.config import Settings
 from obsidian_sidecar.coordination import CloudLease, local_writer_status
 from obsidian_sidecar.maintenance import (
     basic_memory_status,
     inspect_vault,
+    reindex_basic_memory,
     write_health_report,
 )
 from obsidian_sidecar.worker import run_maintenance
@@ -105,6 +108,64 @@ def test_missing_basic_memory_is_not_reported_healthy(
         "obsidian_sidecar.maintenance.basic_memory_binary", lambda: None
     )
     assert basic_memory_status(settings) == "unavailable"
+
+
+def test_default_basic_memory_refresh_waits_for_incremental_indexing(
+    settings: Settings, monkeypatch
+) -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_run(command: list[str], **kwargs) -> CompletedProcess[str]:
+        calls.append((command, kwargs["timeout"]))
+        return CompletedProcess(command, 0, "{}", "")
+
+    monkeypatch.setattr(maintenance, "basic_memory_binary", lambda: "/usr/bin/bm")
+    monkeypatch.setattr(maintenance.subprocess, "run", fake_run)
+
+    assert reindex_basic_memory(settings) == "ok"
+    assert calls == [
+        (
+            [
+                "/usr/bin/bm",
+                "status",
+                "--project",
+                settings.basic_memory_project,
+                "--wait",
+                "--timeout",
+                "90",
+                "--json",
+            ],
+            120,
+        )
+    ]
+
+
+def test_explicit_full_basic_memory_refresh_rebuilds_search_only(
+    settings: Settings, monkeypatch
+) -> None:
+    calls: list[tuple[list[str], int]] = []
+
+    def fake_run(command: list[str], **kwargs) -> CompletedProcess[str]:
+        calls.append((command, kwargs["timeout"]))
+        return CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(maintenance, "basic_memory_binary", lambda: "/usr/bin/bm")
+    monkeypatch.setattr(maintenance.subprocess, "run", fake_run)
+
+    assert reindex_basic_memory(settings, full=True) == "ok"
+    assert calls == [
+        (
+            [
+                "/usr/bin/bm",
+                "reindex",
+                "--project",
+                settings.basic_memory_project,
+                "--full",
+                "--search",
+            ],
+            240,
+        )
+    ]
 
 
 def test_doctor_excludes_syncthing_version_history(settings: Settings) -> None:
