@@ -5,7 +5,8 @@
 - Existing Obsidian vault directory.
 - Executable Codex CLI authenticated for a supported curation model.
 - `uv` for isolated tool installation and updates.
-- Optional Obsidian CLI and Basic Memory CLI.
+- Basic Memory CLI when its integration is requested.
+- Official Obsidian CLI for macOS live acceptance; optional on Linux.
 
 No API key is an installation input. Cloud replication is a separate operator
 workflow and is disabled by default.
@@ -91,8 +92,10 @@ obsidian-sidecar benchmark
 
 `verify-install` checks structural integration. `doctor` checks vault health.
 `benchmark` is the live acceptance test and must score at least 80 with no
-critical failures. Hook trust remains a deliberate human action in a fresh
-Codex session.
+critical failures. On macOS that includes the official Obsidian CLI and a clean
+launchd exit; on Linux it includes an enabled active user-systemd timer whose
+service last exited cleanly, and may skip Obsidian CLI search when the CLI is
+absent. Hook trust remains a deliberate human action in a fresh Codex session.
 
 For an existing managed vault upgrading to 0.4.0 or later, run the read-only
 `knowledge-migrate` plan, review its project and decision counts, and apply only
