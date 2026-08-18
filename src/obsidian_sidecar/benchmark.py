@@ -140,7 +140,7 @@ def _background_service_health(settings: Settings) -> str:
         )
         assert properties.get("Result") == "success", properties
         assert properties.get("ExecMainStatus") == "0", properties
-        assert properties.get("ExecMainCode") == "exited", properties
+        assert properties.get("ExecMainCode") in {"1", "exited"}, properties
         started = (properties.get("ExecMainStartTimestamp") or "").strip()
         assert started and started.casefold() not in {"", "n/a"}, properties
         return (

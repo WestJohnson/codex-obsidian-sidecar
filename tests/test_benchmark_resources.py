@@ -55,7 +55,7 @@ def test_background_service_health_uses_systemd_on_linux(
             (
                 "Result=success\n"
                 "ExecMainStatus=0\n"
-                "ExecMainCode=exited\n"
+                "ExecMainCode=1\n"
                 "ExecMainStartTimestamp=Mon 2026-08-17 12:00:00 UTC\n"
             ),
             "",

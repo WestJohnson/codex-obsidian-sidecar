@@ -95,7 +95,7 @@ Healthy results are:
 - benchmark score at least 80, with no failed critical gate;
 - background service clean on the host platform: launchd `last exit code = 0`
   on macOS, or an enabled active user-systemd timer whose service reports
-  `Result=success`, `ExecMainStatus=0`, `ExecMainCode=exited`, and a real
+  `Result=success`, `ExecMainStatus=0`, normal-exit `ExecMainCode=1`, and a real
   `ExecMainStartTimestamp` on Linux;
 - no files in `~/.local/share/codex-obsidian-sidecar/failed/`.
 - cloud benchmark score at least 80 with every critical gate passing.
