@@ -20,7 +20,7 @@ from .checkpoints import checkpoint_path, load_checkpoint
 from .config import Settings
 from .coordination import LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, StaticCurator
-from .maintenance import commit_git_backup, inspect_vault
+from .maintenance import commit_git_backup, inspect_vault, reindex_basic_memory
 from .queueing import enqueue_event, ready_groups
 from .security import REDACTION, contains_secret, redact_text
 from .transcript import build_curation_packet, extract_messages
@@ -435,11 +435,7 @@ def run_benchmark(settings: Settings) -> dict:
                     encoding="utf-8",
                 )
             bm = shutil.which("bm") or str(Path.home() / ".local" / "bin" / "bm")
-            reindex = _run(
-                [bm, "reindex", "--project", settings.basic_memory_project],
-                timeout=180,
-            )
-            assert reindex.returncode == 0, reindex.stderr
+            assert reindex_basic_memory(settings) == "ok"
             status = _run(
                 [
                     bm,

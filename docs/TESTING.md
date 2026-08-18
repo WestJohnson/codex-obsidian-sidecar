@@ -23,7 +23,7 @@ untrusted hook, unavailable retrieval layer, or failed live curation path.
 | Vault doctor detection | 6 | No | Broken links and secrets reduce health. |
 | Git backup snapshot | 4 | No | A restorable local commit is created. |
 | Obsidian CLI search | 5 | Yes | On macOS, Obsidian finds a newly written note. On Linux without the official CLI, the case still passes and Basic Memory covers live retrieval. |
-| Basic Memory retrieval | 10 | Yes | Lexical and hybrid searches find a fixture. |
+| Basic Memory retrieval | 10 | Yes | Incremental indexing settles, then lexical and hybrid searches find a fixture. |
 | Installed integration health | 5 | Yes | Stop hook is trusted, and the platform service manager is clean: launchd on macOS, or an enabled active user-systemd timer whose service last exited cleanly on Linux. |
 | Live Luna curation | 15 | Yes | Luna returns locally valid grounded output. |
 | Live complete pipeline | 10 | Yes | Capture through write, private checkpoint, and doctor succeeds. |
