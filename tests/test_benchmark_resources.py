@@ -9,6 +9,7 @@ from obsidian_sidecar.benchmark import (
     _background_service_health,
     _find_obsidian_cli,
     _fixture_json,
+    _obsidian_cli_search_succeeded,
 )
 from obsidian_sidecar.config import Settings
 
@@ -31,6 +32,19 @@ def test_find_obsidian_cli_returns_none_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(benchmark.Path, "is_file", lambda self: False)
 
     assert _find_obsidian_cli() is None
+
+
+def test_obsidian_cli_search_requires_a_clean_matching_result() -> None:
+    command = ["obsidian", "search"]
+
+    assert _obsidian_cli_search_succeeded(
+        CompletedProcess(command, 0, '[{"file":"obsidian-cli-e2e.md"}]', ""),
+        "obsidian-cli-e2e",
+    )
+    assert not _obsidian_cli_search_succeeded(
+        CompletedProcess(command, 133, "Loaded main app package", "core dumped"),
+        "obsidian-cli-e2e",
+    )
 
 
 def test_background_service_health_uses_systemd_on_linux(
