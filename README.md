@@ -23,19 +23,9 @@ memory.
 
 ## Quick Start
 
-Install an exact public release:
-
-```sh
-SIDECAR_VERSION=0.6.1
-SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
-SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
-mkdir -p artifacts
-curl -fLo "artifacts/$SIDECAR_WHEEL" "$SIDECAR_RELEASE/artifacts/$SIDECAR_WHEEL"
-curl -fLO "$SIDECAR_RELEASE/SHA256SUMS"
-grep "artifacts/$SIDECAR_WHEEL$" SHA256SUMS | shasum -a 256 -c -
-uv tool install "./artifacts/$SIDECAR_WHEEL"
-obsidian-sidecar preflight
-```
+Install an exact public release using the authoritative
+[direct-installation procedure](docs/INSTALL.md#direct-installation), then run
+`obsidian-sidecar preflight`.
 
 Generate a read-only setup plan:
 
@@ -147,7 +137,7 @@ required on macOS and optional on Linux; see [Testing](docs/TESTING.md).
 
 ## Status
 
-Version `0.6.1` uses the self-hosted Charmfile release channel. Source,
+The current release uses the self-hosted Charmfile release channel. Source,
 checksummed artifacts, and update metadata are served from
 `ai.westhawaiimarketing.com`; GitHub remains a public mirror and
 build-provenance surface. The updater never mutates automatically and refuses

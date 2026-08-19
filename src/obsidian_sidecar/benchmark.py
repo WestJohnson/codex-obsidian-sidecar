@@ -151,7 +151,11 @@ def _background_service_health(settings: Settings) -> str:
         )
         assert properties.get("Result") == "success", properties
         assert properties.get("ExecMainStatus") == "0", properties
-        assert properties.get("ExecMainCode") in {"1", "exited"}, properties
+        # systemd exposes a successful oneshot's main-code as the symbolic
+        # ``exited`` value or a numeric representation that varies by release.
+        # Result, status, and the non-empty start timestamp carry the actual
+        # clean-run guarantees checked here.
+        assert properties.get("ExecMainCode") in {"0", "1", "exited"}, properties
         started = (properties.get("ExecMainStartTimestamp") or "").strip()
         assert started and started.casefold() not in {"", "n/a"}, properties
         return (

@@ -11,7 +11,9 @@ require root, a public server, or an API key for local operation.
 - `uv`;
 - Basic Memory CLI when retrieval integration is selected;
 - official Obsidian CLI for macOS live acceptance; optional on Linux, where
-  Basic Memory covers live retrieval (see [Testing](TESTING.md)).
+  Basic Memory covers live retrieval (see [Testing](TESTING.md));
+- `notify-send` when Linux desktop notifications are desired (see
+  [Operations](OPERATIONS.md#runtime-topology)).
 
 Windows can run the package and worker manually, but the production installer
 does not create a Windows scheduler task.
@@ -32,10 +34,10 @@ the package performs all configuration writes and verification.
 
 ## Direct Installation
 
-Install an exact release:
+Set `SIDECAR_VERSION` to the exact published release you approved:
 
 ```sh
-SIDECAR_VERSION=0.6.1
+SIDECAR_VERSION=X.Y.Z
 SIDECAR_WHEEL="codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
 SIDECAR_RELEASE="https://ai.westhawaiimarketing.com/charmfile/releases/sidecar/${SIDECAR_VERSION}"
 mkdir -p artifacts

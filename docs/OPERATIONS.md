@@ -32,10 +32,14 @@
    an exact source/task fingerprint match.
 10. A five-minute reconnect timer notices a returned peer and publishes a
     matching stage within the configured ten-minute rate limit.
-11. The Mac displays a deduplicated notification only for failed curation
-    events, Syncthing conflicts, persistent cloud failure markers, or a staged
-    report left unpublished for more than 24 hours. Curation and sync failures
-    are named as separate subsystems.
+11. The local worker attempts a deduplicated desktop notification only for
+    failed curation events, Syncthing conflicts, persistent cloud failure
+    markers, or a staged report left unpublished for more than 24 hours.
+    macOS delivery uses Notification Center through `osascript`; Linux delivery
+    uses `notify-send`. If native notification delivery is unavailable or
+    fails, the worker records the active alert and delivery error without
+    failing the cycle, and the same alert remains suppressed for the configured
+    cooldown. Curation and sync failures are named as separate subsystems.
 
 Raw transcripts, tool output, reasoning, developer instructions, and hook
 payload contents are not copied into the vault.
@@ -95,8 +99,9 @@ Healthy results are:
 - benchmark score at least 80, with no failed critical gate;
 - background service clean on the host platform: launchd `last exit code = 0`
   on macOS, or an enabled active user-systemd timer whose service reports
-  `Result=success`, `ExecMainStatus=0`, normal-exit `ExecMainCode=1`, and a real
-  `ExecMainStartTimestamp` on Linux;
+  `Result=success`, `ExecMainStatus=0`, an `ExecMainCode` of `exited` or numeric
+  `1` or `0`, and a real `ExecMainStartTimestamp` on Linux; all four service
+  properties are required together;
 - no files in `~/.local/share/codex-obsidian-sidecar/failed/`.
 - cloud benchmark score at least 80 with every critical gate passing.
 - no `/var/lib/obsidian-cloud/maintenance.failed` marker on the VPS.

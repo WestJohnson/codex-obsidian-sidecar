@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2 - 2026-08-19
+
+- Added native Linux desktop alerts through `notify-send` while retaining
+  macOS Notification Center delivery through `osascript`.
+- Persisted actionable alert state when a platform notifier is unavailable so
+  a missing desktop integration cannot fail the worker or retry every minute.
+- Accepted Arch systemd's numeric zero main-code for a successful completed
+  oneshot when the result, status, and start timestamp independently pass.
+
 ## 0.6.1 - 2026-07-28
 
 - Bounded long-thread checkpoint evidence to a recent working set so saturated
