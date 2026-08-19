@@ -1,7 +1,9 @@
 import json
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import obsidian_sidecar.alerts as alerts
 from obsidian_sidecar.alerts import alert_status, run_alert_cycle
 from obsidian_sidecar.config import Settings
 
@@ -120,3 +122,65 @@ def test_remote_cloud_probe_is_cached_for_fifteen_minutes(
     )
 
     assert calls == 1
+
+
+def test_linux_notification_uses_notify_send(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(alerts.shutil, "which", lambda _name: "/usr/bin/notify-send")
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(alerts.subprocess, "run", run)
+
+    alerts._linux_notification("Memory alert", "Cloud maintenance needs attention")
+
+    assert calls == [
+        [
+            "/usr/bin/notify-send",
+            "--app-name",
+            "Codex Memory",
+            "Memory alert",
+            "Cloud maintenance needs attention",
+        ]
+    ]
+
+
+def test_platform_notification_selects_linux(monkeypatch) -> None:
+    notifications: list[tuple[str, str]] = []
+    monkeypatch.setattr(alerts.sys, "platform", "linux")
+    monkeypatch.setattr(
+        alerts,
+        "_linux_notification",
+        lambda title, message: notifications.append((title, message)),
+    )
+
+    alerts._platform_notification("Memory alert", "Linux works")
+
+    assert notifications == [("Memory alert", "Linux works")]
+
+
+def test_alert_cycle_records_alert_when_native_notification_is_unavailable(
+    settings: Settings,
+) -> None:
+    configured = replace(settings, alerts_enabled=True)
+    (configured.failed_dir / "failed.json").write_text("{}", encoding="utf-8")
+
+    def unavailable(_title: str, _message: str) -> None:
+        raise RuntimeError("no desktop notifier")
+
+    first = run_alert_cycle(configured, now=NOW, notifier=unavailable)
+    second = run_alert_cycle(
+        configured,
+        now=NOW + timedelta(minutes=5),
+        notifier=unavailable,
+    )
+    state = json.loads((configured.state_dir / "alert-state.json").read_text())
+
+    assert first["status"] == "recorded"
+    assert first["notification_error"] == "RuntimeError"
+    assert second["status"] == "suppressed"
+    assert state["active_codes"] == ["queue-failed"]
+    assert state["notification_error"] == "RuntimeError"

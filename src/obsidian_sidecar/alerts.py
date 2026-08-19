@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -139,6 +141,31 @@ def _macos_notification(title: str, message: str) -> None:
         raise RuntimeError("macOS notification delivery failed")
 
 
+def _linux_notification(title: str, message: str) -> None:
+    executable = shutil.which("notify-send")
+    if executable is None:
+        raise RuntimeError("Linux notification delivery is unavailable")
+    result = subprocess.run(
+        [executable, "--app-name", "Codex Memory", title, message],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Linux notification delivery failed")
+
+
+def _platform_notification(title: str, message: str) -> None:
+    if sys.platform == "darwin":
+        _macos_notification(title, message)
+        return
+    if sys.platform.startswith("linux"):
+        _linux_notification(title, message)
+        return
+    raise RuntimeError(f"notification delivery is unsupported on {sys.platform}")
+
+
 def run_alert_cycle(
     settings: Settings,
     *,
@@ -226,7 +253,13 @@ def run_alert_cycle(
         }
 
     titles = [str(item.get("title") or item.get("code")) for item in status["alerts"]]
-    (notifier or _macos_notification)("Codex memory needs attention", "; ".join(titles))
+    notification_error: str | None = None
+    try:
+        (notifier or _platform_notification)(
+            "Codex memory needs attention", "; ".join(titles)
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        notification_error = type(error).__name__
     _atomic_write(
         state_path,
         json.dumps(
@@ -237,14 +270,16 @@ def run_alert_cycle(
                 "active_fingerprint": fingerprint,
                 "active_codes": [item.get("code") for item in status["alerts"]],
                 "remote_probe_error": remote_error,
+                "notification_error": notification_error,
             },
             indent=2,
         )
         + "\n",
     )
     return {
-        "status": "notified",
+        "status": "notified" if notification_error is None else "recorded",
         "checked_at": checked_at.isoformat(),
         "alerts": status["alerts"],
         "remote_probe_error": remote_error,
+        "notification_error": notification_error,
     }
