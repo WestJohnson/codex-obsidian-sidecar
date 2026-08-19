@@ -162,20 +162,32 @@ def test_platform_notification_selects_linux(monkeypatch) -> None:
     assert notifications == [("Memory alert", "Linux works")]
 
 
+def test_platform_notification_preserves_macos_path(monkeypatch) -> None:
+    notifications: list[tuple[str, str]] = []
+    monkeypatch.setattr(alerts.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        alerts,
+        "_macos_notification",
+        lambda title, message: notifications.append((title, message)),
+    )
+
+    alerts._platform_notification("Memory alert", "macOS still works")
+
+    assert notifications == [("Memory alert", "macOS still works")]
+
+
 def test_alert_cycle_records_alert_when_native_notification_is_unavailable(
-    settings: Settings,
+    settings: Settings, monkeypatch
 ) -> None:
     configured = replace(settings, alerts_enabled=True)
     (configured.failed_dir / "failed.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(alerts.sys, "platform", "linux")
+    monkeypatch.setattr(alerts.shutil, "which", lambda _name: None)
 
-    def unavailable(_title: str, _message: str) -> None:
-        raise RuntimeError("no desktop notifier")
-
-    first = run_alert_cycle(configured, now=NOW, notifier=unavailable)
+    first = run_alert_cycle(configured, now=NOW)
     second = run_alert_cycle(
         configured,
         now=NOW + timedelta(minutes=5),
-        notifier=unavailable,
     )
     state = json.loads((configured.state_dir / "alert-state.json").read_text())
 

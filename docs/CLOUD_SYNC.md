@@ -196,12 +196,11 @@ leave `/var/lib/obsidian-cloud/maintenance.failed` until successful completion.
 The success handler removes the marker and resets the retry counter so
 operator-triggered healthy runs do not exhaust the failure budget.
 
-The Mac launchd worker probes `alert-status` over the configured
+The local worker probes `alert-status` over the configured
 `cloud_status_ssh_host` at most once every 15 minutes. A failed probe is
-recorded but does not notify by itself. Desktop
-notifications are reserved for failed queue entries, sync conflicts, a cloud
-failure marker, or a staged report older than 24 hours, and identical alerts
-are suppressed for 24 hours.
+recorded but does not notify by itself. Platform delivery, actionable alert
+conditions, and cooldown behavior are defined in
+[Operations](OPERATIONS.md#runtime-topology).
 
 ## Recovery
 

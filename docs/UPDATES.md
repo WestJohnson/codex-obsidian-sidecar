@@ -53,8 +53,8 @@ configuration, workflow, and signing key as production release infrastructure.
 
 1. Work from a Git checkout with a configured `origin`, a clean tree, and a
    protected default branch; do not tag an extracted release bundle.
-2. Update `pyproject.toml`, `src/obsidian_sidecar/__init__.py`, and
-   `CHANGELOG.md` to the same version.
+2. Update `pyproject.toml` and `src/obsidian_sidecar/__init__.py`, refresh
+   `uv.lock`, and add the matching `CHANGELOG.md` release entry.
 3. Run `uv run python scripts/export_release.py`.
 4. Verify every generated artifact with `SHA256SUMS`.
 5. Push a signed `vX.Y.Z` tag after review. CI rejects a tag that does not
