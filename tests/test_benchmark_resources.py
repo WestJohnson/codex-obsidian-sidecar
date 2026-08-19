@@ -108,6 +108,39 @@ def test_background_service_health_uses_systemd_on_linux(
     ]
 
 
+def test_background_service_health_accepts_arch_oneshot_main_code_zero(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = Settings(
+        vault_path=tmp_path / "vault",
+        state_dir=tmp_path / "state",
+        codex_bin=Path("/bin/false"),
+    )
+
+    def fake_run(command: list[str], **kwargs) -> CompletedProcess[str]:
+        if "is-enabled" in command:
+            return CompletedProcess(command, 0, "enabled\n", "")
+        if "is-active" in command:
+            return CompletedProcess(command, 0, "active\n", "")
+        return CompletedProcess(
+            command,
+            0,
+            (
+                "Result=success\n"
+                "ExecMainStatus=0\n"
+                "ExecMainCode=0\n"
+                "ExecMainStartTimestamp=Wed 2026-08-19 12:18:56 HST\n"
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(benchmark.sys, "platform", "linux")
+    monkeypatch.setattr(benchmark.shutil, "which", lambda name: "/usr/bin/systemctl")
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+
+    assert "last exited cleanly" in _background_service_health(settings)
+
+
 def test_background_service_health_rejects_never_run_linux_service(
     monkeypatch, tmp_path: Path
 ) -> None:
