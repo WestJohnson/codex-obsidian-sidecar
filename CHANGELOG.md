@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.3 - 2026-08-19
+
+- Made the live benchmark use a stable schema-safe working-directory name so
+  model curation cannot inherit an invalid random underscore from `tempfile`.
+- Made installed integration verification honor the absolute Sidecar command
+  used to launch the benchmark when noninteractive SSH does not load the
+  user's local-bin `PATH`.
+
 ## 0.6.2 - 2026-08-19
 
 - Added native Linux desktop alerts through `notify-send` while retaining

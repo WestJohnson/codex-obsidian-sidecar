@@ -93,6 +93,22 @@ def _find_obsidian_cli() -> str | None:
     return None
 
 
+def _find_sidecar_cli() -> str | None:
+    discovered = shutil.which("obsidian-sidecar")
+    if discovered:
+        return discovered
+    invoked = Path(sys.argv[0]).expanduser()
+    if invoked.name == "obsidian-sidecar" and invoked.is_file():
+        return str(invoked.absolute())
+    return None
+
+
+def _benchmark_working_directory(base: Path) -> Path:
+    workspace = base / "rainbow-joes"
+    workspace.mkdir()
+    return workspace
+
+
 def _obsidian_cli_search_succeeded(
     result: subprocess.CompletedProcess[str], expected_note: str
 ) -> bool:
@@ -271,6 +287,7 @@ def run_benchmark(settings: Settings) -> dict:
 
     with tempfile.TemporaryDirectory(prefix="obsidian-sidecar-benchmark-") as temp_name:
         base = Path(temp_name)
+        benchmark_cwd = _benchmark_working_directory(base)
         transcript = base / "transcript.jsonl"
         transcript.write_text(
             (FIXTURES / "transcript.jsonl").read_text(encoding="utf-8"),
@@ -278,7 +295,7 @@ def run_benchmark(settings: Settings) -> dict:
         )
         test_settings = _test_settings(base, settings)
         valid = _fixture_json("valid-curation.json")
-        event = _event(transcript, base)
+        event = _event(transcript, benchmark_cwd)
 
         def transcript_boundary() -> str:
             _, messages = extract_messages(transcript)
@@ -513,7 +530,7 @@ def run_benchmark(settings: Settings) -> dict:
             entries = response.get("data", [])
             assert len(entries) == 1, entries
             assert not entries[0].get("errors"), entries[0].get("errors")
-            sidecar_bin = shutil.which("obsidian-sidecar")
+            sidecar_bin = _find_sidecar_cli()
             assert sidecar_bin, "obsidian-sidecar is not on PATH"
             expected_command = f"{sidecar_bin} capture-hook"
             hooks = [

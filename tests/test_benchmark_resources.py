@@ -7,7 +7,9 @@ from obsidian_sidecar import benchmark
 from obsidian_sidecar.benchmark import (
     FIXTURES,
     _background_service_health,
+    _benchmark_working_directory,
     _find_obsidian_cli,
+    _find_sidecar_cli,
     _fixture_json,
     _obsidian_cli_search_succeeded,
 )
@@ -32,6 +34,26 @@ def test_find_obsidian_cli_returns_none_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(benchmark.Path, "is_file", lambda self: False)
 
     assert _find_obsidian_cli() is None
+
+
+def test_find_sidecar_cli_falls_back_to_absolute_invocation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    executable = tmp_path / "obsidian-sidecar"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(benchmark.shutil, "which", lambda name: None)
+    monkeypatch.setattr(benchmark.sys, "argv", [str(executable)])
+
+    assert _find_sidecar_cli() == str(executable.absolute())
+
+
+def test_benchmark_working_directory_has_schema_safe_stable_name(
+    tmp_path: Path,
+) -> None:
+    workspace = _benchmark_working_directory(tmp_path)
+
+    assert workspace.name == "rainbow-joes"
+    assert workspace.is_dir()
 
 
 def test_obsidian_cli_search_requires_a_clean_matching_result() -> None:
