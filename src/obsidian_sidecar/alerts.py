@@ -166,6 +166,16 @@ def _platform_notification(title: str, message: str) -> None:
     raise RuntimeError(f"notification delivery is unsupported on {sys.platform}")
 
 
+def _alert_fingerprint(alerts: list[dict[str, Any]]) -> str:
+    identities = sorted(
+        {
+            str(item.get("code") or item.get("title") or "unknown-alert")
+            for item in alerts
+        }
+    )
+    return hashlib.sha256(json.dumps(identities).encode()).hexdigest()
+
+
 def run_alert_cycle(
     settings: Settings,
     *,
@@ -222,9 +232,7 @@ def run_alert_cycle(
             "remote_probe_error": remote_error,
         }
 
-    fingerprint = hashlib.sha256(
-        json.dumps(status["alerts"], sort_keys=True).encode()
-    ).hexdigest()
+    fingerprint = _alert_fingerprint(status["alerts"])
     prior: dict[str, Any] = {}
     if state_path.exists():
         try:

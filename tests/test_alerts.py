@@ -176,11 +176,19 @@ def test_platform_notification_preserves_macos_path(monkeypatch) -> None:
     assert notifications == [("Memory alert", "macOS still works")]
 
 
-def test_alert_cycle_records_alert_when_native_notification_is_unavailable(
+def test_alert_cycle_cools_down_stale_report_when_notification_is_unavailable(
     settings: Settings, monkeypatch
 ) -> None:
     configured = replace(settings, alerts_enabled=True)
-    (configured.failed_dir / "failed.json").write_text("{}", encoding="utf-8")
+    (configured.state_dir / "cloud-staged-report.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "staged_at": (NOW - timedelta(hours=25)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(alerts.sys, "platform", "linux")
     monkeypatch.setattr(alerts.shutil, "which", lambda _name: None)
 
@@ -194,5 +202,5 @@ def test_alert_cycle_records_alert_when_native_notification_is_unavailable(
     assert first["status"] == "recorded"
     assert first["notification_error"] == "RuntimeError"
     assert second["status"] == "suppressed"
-    assert state["active_codes"] == ["queue-failed"]
+    assert state["active_codes"] == ["staged-report-stale"]
     assert state["notification_error"] == "RuntimeError"
