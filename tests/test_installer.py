@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,30 @@ def test_setup_preserves_hooks_and_is_idempotent(
     assert "api_key" not in config
 
 
+def test_setup_preserves_existing_freshness_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options.config_path.parent.mkdir(parents=True)
+    options.config_path.write_text(
+        json.dumps(
+            {
+                "freshness_project_days": 90,
+                "freshness_decision_days": 120,
+                "freshness_runbook_days": 21,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    apply_setup(options)
+
+    config = json.loads(options.config_path.read_text(encoding="utf-8"))
+    assert config["freshness_project_days"] == 90
+    assert config["freshness_decision_days"] == 120
+    assert config["freshness_runbook_days"] == 21
+
+
 def test_setup_migrates_an_existing_sidecar_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,3 +195,45 @@ def test_setup_rejects_missing_vault(
 
     with pytest.raises(FileNotFoundError, match="vault does not exist"):
         setup_plan(missing)
+
+
+def test_macos_service_reload_clears_a_stale_disabled_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options = SetupOptions(
+        **{
+            **options.__dict__,
+            "install_service": True,
+            "service_label": "com.example.sidecar",
+        }
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, timeout: int = 20, check: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer.os, "getuid", lambda: 501)
+    monkeypatch.setattr(installer, "_run", fake_run)
+
+    result = installer._reload_service(options)
+
+    assert result == {"manager": "launchd", "status": "loaded"}
+    assert calls[0] == [
+        "launchctl",
+        "enable",
+        "gui/501/com.example.sidecar",
+    ]
+    assert calls[1][0:2] == ["launchctl", "bootout"]
+    assert calls[2][0:2] == ["launchctl", "bootstrap"]
+    assert calls[3] == [
+        "launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/com.example.sidecar",
+    ]

@@ -392,9 +392,6 @@ def _config_bytes(options: SetupOptions) -> bytes:
             "sidecar_executable": str(_resolved_executable(options)),
             "model": options.model,
             "basic_memory_project": options.basic_memory_project,
-            "freshness_project_days": 30,
-            "freshness_decision_days": 90,
-            "freshness_runbook_days": 14,
             "runtime_role": "local",
             "service_label": options.service_label,
             "update_checks_enabled": options.enable_update_checks,
@@ -407,6 +404,9 @@ def _config_bytes(options: SetupOptions) -> bytes:
             },
         }
     )
+    raw.setdefault("freshness_project_days", 30)
+    raw.setdefault("freshness_decision_days", 90)
+    raw.setdefault("freshness_runbook_days", 14)
     raw.setdefault("checkpoint_enabled", True)
     raw.setdefault("checkpoint_max_evidence_chars", 20_000)
     raw.setdefault("curator_usage_logging", True)
@@ -501,6 +501,14 @@ def _basic_memory_registration(project: str, vault: Path) -> dict[str, Any]:
 def _reload_service(options: SetupOptions) -> dict[str, Any]:
     if sys.platform == "darwin":
         target = f"gui/{os.getuid()}"
+        enabled = _run(
+            ["launchctl", "enable", f"{target}/{options.service_label}"],
+            timeout=20,
+        )
+        if enabled.returncode != 0:
+            raise RuntimeError(
+                f"launchd enable failed: {enabled.stderr.strip()[:500]}"
+            )
         _run(
             ["launchctl", "bootout", f"{target}/{options.service_label}"],
             timeout=20,
