@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import select
@@ -616,6 +617,14 @@ def run_benchmark(settings: Settings) -> dict:
     return _finish_benchmark(settings, results)
 
 
+@contextmanager
+def _benchmark_result_lock(settings: Settings):
+    settings.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (settings.lock_dir / "benchmark-results.lock").open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
 def _finish_benchmark(settings: Settings, results: list[CaseResult]) -> dict:
     score = sum(case.weight for case in results if case.passed)
     critical_failures = [
@@ -632,13 +641,18 @@ def _finish_benchmark(settings: Settings, results: list[CaseResult]) -> dict:
         "cases": [asdict(case) for case in results],
     }
     result_path = settings.state_dir / "benchmark-results" / "latest.json"
-    save_event(result_path, output)
-    return publish_benchmark_report(settings)
+    with _benchmark_result_lock(settings):
+        save_event(result_path, output)
+        return _publish_benchmark_report(settings, output)
 
 
 def publish_benchmark_report(settings: Settings) -> dict:
     result_path = settings.state_dir / "benchmark-results" / "latest.json"
-    output = load_event(result_path)
+    with _benchmark_result_lock(settings):
+        return _publish_benchmark_report(settings, load_event(result_path))
+
+
+def _publish_benchmark_report(settings: Settings, output: dict) -> dict:
     results = [CaseResult(**case) for case in output["cases"]]
     report_path = settings.vault_path / "_System" / "Health" / "benchmark-latest.md"
     lines = [
@@ -669,5 +683,5 @@ def publish_benchmark_report(settings: Settings) -> dict:
         output["report_publication"] = {"status": "deferred", "reason": error.reason}
     else:
         output["report_publication"] = {"status": "published"}
-    save_event(result_path, output)
+    save_event(settings.state_dir / "benchmark-results" / "latest.json", output)
     return output
