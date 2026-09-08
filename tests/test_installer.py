@@ -231,9 +231,4 @@ def test_macos_service_reload_clears_a_stale_disabled_flag(
     ]
     assert calls[1][0:2] == ["launchctl", "bootout"]
     assert calls[2][0:2] == ["launchctl", "bootstrap"]
-    assert calls[3] == [
-        "launchctl",
-        "kickstart",
-        "-k",
-        "gui/501/com.example.sidecar",
-    ]
+    assert len(calls) == 3  # RunAtLoad starts once, without killing the new worker.

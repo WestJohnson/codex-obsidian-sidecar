@@ -129,6 +129,7 @@ required on macOS and optional on Linux; see [Testing](docs/TESTING.md).
 
 - [Installation](docs/INSTALL.md)
 - [Operations](docs/OPERATIONS.md)
+- [Runtime reliability and capture recovery](docs/RUNTIME_RELIABILITY.md)
 - [Testing](docs/TESTING.md)
 - [Knowledge State](docs/KNOWLEDGE_STATE.md)
 - [Updates](docs/UPDATES.md)

@@ -42,6 +42,7 @@ class SetupOptions:
     install_service: bool = True
     register_basic_memory: bool = True
     enable_update_checks: bool = True
+    freshness_project_days: int | None = None
 
 
 def _run(
@@ -203,6 +204,11 @@ def _service_paths(label: str) -> list[Path]:
 
 
 def _validate_options(options: SetupOptions) -> None:
+    if (
+        options.freshness_project_days is not None
+        and not 1 <= options.freshness_project_days <= 3650
+    ):
+        raise ValueError("Project freshness days must be between 1 and 3650")
     vault = options.vault_path.expanduser()
     codex = options.codex_bin.expanduser()
     if not vault.is_dir():
@@ -405,6 +411,8 @@ def _config_bytes(options: SetupOptions) -> bytes:
         }
     )
     raw.setdefault("freshness_project_days", 30)
+    if options.freshness_project_days is not None:
+        raw["freshness_project_days"] = options.freshness_project_days
     raw.setdefault("freshness_decision_days", 90)
     raw.setdefault("freshness_runbook_days", 14)
     raw.setdefault("checkpoint_enabled", True)
@@ -506,9 +514,7 @@ def _reload_service(options: SetupOptions) -> dict[str, Any]:
             timeout=20,
         )
         if enabled.returncode != 0:
-            raise RuntimeError(
-                f"launchd enable failed: {enabled.stderr.strip()[:500]}"
-            )
+            raise RuntimeError(f"launchd enable failed: {enabled.stderr.strip()[:500]}")
         _run(
             ["launchctl", "bootout", f"{target}/{options.service_label}"],
             timeout=20,
@@ -519,14 +525,8 @@ def _reload_service(options: SetupOptions) -> dict[str, Any]:
             raise RuntimeError(
                 f"launchd bootstrap failed: {loaded.stderr.strip()[:500]}"
             )
-        started = _run(
-            ["launchctl", "kickstart", "-k", f"{target}/{options.service_label}"],
-            timeout=20,
-        )
-        if started.returncode != 0:
-            raise RuntimeError(
-                f"launchd kickstart failed: {started.stderr.strip()[:500]}"
-            )
+        # RunAtLoad already starts the worker. A forced kickstart can kill it
+        # mid-write immediately after bootstrap and strand its shared lease.
         return {"manager": "launchd", "status": "loaded"}
     systemctl = shutil.which("systemctl")
     if not systemctl:

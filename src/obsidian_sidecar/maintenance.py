@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any
 import yaml
 
 from .config import Settings
+from .queueing import capture_health, runtime_problem
 from .security import contains_secret
 from .vault import (
     MANAGED_BY,
@@ -47,6 +49,10 @@ class VaultHealth:
     possible_secret_files: list[str] = field(default_factory=list)
     queue_pending: int = 0
     queue_failed: int = 0
+    capture_pending: int = 0
+    capture_stalled: int = 0
+    capture_failed: int = 0
+    runtime_problem: str | None = None
     obsidian_cli: str = "unknown"
     basic_memory: str = "unknown"
     git_backup: str = "unknown"
@@ -70,6 +76,8 @@ class VaultHealth:
             + len(self.freshness_review_due)
             + len(self.freshness_unknown)
             + self.queue_failed
+            + self.capture_stalled
+            + self.capture_failed
         )
 
     @property
@@ -81,7 +89,12 @@ class VaultHealth:
             penalty += 5
         if self.git_backup not in {"ok", "clean"}:
             penalty += 5
-        return max(0, 100 - penalty)
+        ceiling = (
+            79
+            if self.capture_stalled or self.capture_failed or self.runtime_problem
+            else 100
+        )
+        return max(0, min(ceiling, 100 - penalty))
 
 
 def _markdown_files(vault: Path) -> list[Path]:
@@ -137,7 +150,7 @@ def basic_memory_status(settings: Settings) -> str:
         return "unavailable"
     try:
         result = subprocess.run(
-            [binary, "status", "--project", settings.basic_memory_project, "--verbose"],
+            [binary, "status", "--project", settings.basic_memory_project, "--json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -148,6 +161,23 @@ def basic_memory_status(settings: Settings) -> str:
     combined = f"{result.stdout}\n{result.stderr}".casefold()
     if result.returncode != 0:
         return "unavailable"
+    try:
+        value = json.loads(result.stdout)
+        if isinstance(value, dict):
+            if isinstance(value.get("observed_files"), list):
+                # BM 0.23 reports disk observations, not index readiness.
+                return "observation-only"
+            if all(key in value for key in ("new", "modified", "deleted")):
+                return (
+                    "stale"
+                    if any(
+                        value.get(key)
+                        for key in ("new", "modified", "deleted", "moves")
+                    )
+                    else "ok"
+                )
+    except ValueError:
+        pass
     if "no changes" in combined:
         return "ok"
     if any(
@@ -190,7 +220,34 @@ def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
         )
     except (OSError, subprocess.TimeoutExpired):
         return "unavailable"
-    return "ok" if result.returncode == 0 else "error"
+    if result.returncode != 0:
+        return "error"
+    if not full:
+        try:
+            value = json.loads(result.stdout)
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and isinstance(value.get("observed_files"), list):
+            # Since BM 0.23, --wait is a compatibility no-op. Request the
+            # synchronous search-only project-index pass, never embeddings.
+            try:
+                indexed = subprocess.run(
+                    [
+                        binary,
+                        "reindex",
+                        "--project",
+                        settings.basic_memory_project,
+                        "--search",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=240,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return "unavailable"
+            return "ok" if indexed.returncode == 0 else "error"
+    return "ok"
 
 
 def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHealth:
@@ -311,18 +368,26 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
             target.append(finding.path)
     health.queue_pending = len(list(settings.queue_dir.glob("*.json")))
     health.queue_failed = len(list(settings.failed_dir.glob("*.json")))
+    captures = capture_health(settings)
+    health.capture_pending = captures["pending"]
+    health.capture_stalled = captures["stalled"]
+    health.capture_failed = captures["failed"]
+    health.runtime_problem = runtime_problem(settings)
     if settings.runtime_role == "cloud":
         health.obsidian_cli = "not-required"
         health.basic_memory = "not-required"
     else:
+        obsidian_binary = shutil.which("obsidian") or "/opt/homebrew/bin/obsidian"
         health.obsidian_cli = _command_status(
             [
-                "/opt/homebrew/bin/obsidian",
+                obsidian_binary,
                 f"vault={settings.vault_path.name}",
                 "vault",
                 "info=path",
             ],
         )
+        if sys.platform.startswith("linux") and not Path(obsidian_binary).exists():
+            health.obsidian_cli = "not-required"
         health.basic_memory = basic_memory_status(settings)
     health.git_backup = git_status(settings.vault_path)
     return health
@@ -375,6 +440,10 @@ def render_health(health: VaultHealth, *, permalink: str | None = None) -> str:
 - Git backup: `{health.git_backup}`
 - Queue pending: {health.queue_pending}
 - Queue failed: {health.queue_failed}
+- Capture recovery pending: {health.capture_pending}
+- Capture recovery stalled: {health.capture_stalled}
+- Capture recovery failed: {health.capture_failed}
+- Worker runtime: {health.runtime_problem or "ok"}
 
 ## Content
 

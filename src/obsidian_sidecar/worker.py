@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -13,7 +14,7 @@ from .checkpoints import (
     seed_checkpoint_from_vault,
 )
 from .config import Settings
-from .coordination import LocalWriterLease, cloud_lease_status
+from .coordination import LeaseBusy, LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, Curator
 from .maintenance import (
     commit_git_backup,
@@ -26,6 +27,7 @@ from .queueing import (
     load_event,
     move_event,
     ready_groups,
+    recover_captures,
     save_event,
     utc_now,
 )
@@ -61,22 +63,29 @@ class ProcessLock:
         self.path = path
         self.stale_seconds = stale_seconds
         self.acquired = False
+        self.handle = None
 
     def __enter__(self) -> "ProcessLock":
-        try:
-            self.path.mkdir(parents=True)
-            self.acquired = True
-        except FileExistsError:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Respect a recent legacy directory lock during a rolling upgrade.
+        if self.path.is_dir():
             age = time.time() - self.path.stat().st_mtime
-            if age > self.stale_seconds:
-                self.path.rmdir()
-                self.path.mkdir(parents=True)
-                self.acquired = True
+            if age <= self.stale_seconds:
+                return self
+        self.handle = self.path.with_suffix(".flock").open("a+b")
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.acquired = True
+        except BlockingIOError:
+            self.handle.close()
+            self.handle = None
         return self
 
     def __exit__(self, *_: object) -> None:
-        if self.acquired:
-            self.path.rmdir()
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
+        self.acquired = False
 
 
 def _mark_group(paths: list[Path], settings: Settings, destination: str) -> None:
@@ -186,6 +195,15 @@ def process_ready(
     force: bool = False,
     curator: Curator | None = None,
 ) -> ProcessSummary:
+    try:
+        return _process_ready(settings, force=force, curator=curator)
+    except LeaseBusy as error:
+        return ProcessSummary(deferred_reason=error.reason)
+
+
+def _process_ready(
+    settings: Settings, *, force: bool = False, curator: Curator | None = None
+) -> ProcessSummary:
     summary = ProcessSummary()
     lease_active, lease_reason, _ = cloud_lease_status(settings.vault_path)
     if settings.runtime_role == "local" and lease_active:
@@ -196,6 +214,7 @@ def process_ready(
         if not lock.acquired:
             summary.deferred_reason = "local-worker-lock"
             return summary
+        recover_captures(settings)
         summary.reconciled_failed_events = reconcile_superseded_failures(settings)
         groups = ready_groups(settings, force=force)
         summary.groups_seen = len(groups)
@@ -217,9 +236,9 @@ def process_ready(
                         event = candidate_event
                         break
                 if event is None:
-                    summary.skipped += 1
-                    _mark_group(paths, settings, "processed")
-                    summary.processed_events += len(paths)
+                    # Old malformed entries are not proof that a session was captured.
+                    summary.failed += 1
+                    _mark_group(paths, settings, "failed")
                     continue
                 try:
                     session_id = str(event.get("session_id") or "unknown")
@@ -367,6 +386,13 @@ def _run_maintenance_unfenced(
 
 
 def run_maintenance(settings: Settings, *, backup: bool = True) -> dict[str, Any]:
+    try:
+        return _run_maintenance(settings, backup=backup)
+    except LeaseBusy as error:
+        return _deferred_maintenance(settings, error.reason)
+
+
+def _run_maintenance(settings: Settings, *, backup: bool = True) -> dict[str, Any]:
     if settings.runtime_role != "local":
         return _run_maintenance_unfenced(settings, backup=backup)
 
@@ -394,6 +420,13 @@ def _checkpoint_due(settings: Settings, now: float) -> bool:
 
 
 def _run_git_checkpoint(settings: Settings) -> dict[str, Any]:
+    try:
+        return _run_git_checkpoint_uncontended(settings)
+    except LeaseBusy as error:
+        return {"status": "deferred", "reason": error.reason}
+
+
+def _run_git_checkpoint_uncontended(settings: Settings) -> dict[str, Any]:
     lease_active, lease_reason, _ = cloud_lease_status(settings.vault_path)
     if lease_active:
         return {"status": "deferred", "reason": f"cloud-maintenance-{lease_reason}"}
@@ -403,16 +436,79 @@ def _run_git_checkpoint(settings: Settings) -> dict[str, Any]:
             return {"status": "deferred", "reason": f"cloud-maintenance-{lease_reason}"}
         result = commit_git_backup(settings, "chore(memory): hourly local checkpoint")
     checked_at = utc_now()
-    _atomic_write(
-        settings.state_dir / "git-checkpoint.json",
-        json.dumps({"schema": 1, "checked_at": checked_at, "result": result}, indent=2)
-        + "\n",
-    )
+    if result in {"ok", "clean"}:
+        _atomic_write(
+            settings.state_dir / "git-checkpoint.json",
+            json.dumps(
+                {"schema": 1, "checked_at": checked_at, "result": result}, indent=2
+            )
+            + "\n",
+        )
     return {"status": result, "checked_at": checked_at}
 
 
 def daemon_once(settings: Settings) -> dict[str, Any]:
-    from .alerts import run_alert_cycle
+    # Serialize the whole timer tick, including maintenance and backup scheduling.
+    with ProcessLock(settings.lock_dir / "daemon.lock") as lock:
+        if not lock.acquired:
+            return {"status": "deferred", "reason": "local-daemon-lock"}
+        status_path = settings.state_dir / "worker-status.json"
+        previous: dict[str, Any] = {}
+        try:
+            if status_path.exists():
+                previous = load_event(status_path)
+        except (OSError, ValueError):
+            pass
+        save_event(status_path, {"checked_at": utc_now(), "status": "running"})
+        try:
+            result = _daemon_once(settings)
+        except Exception as error:
+            save_event(
+                status_path,
+                {
+                    "checked_at": utc_now(),
+                    "status": "error",
+                    "error": type(error).__name__,
+                },
+            )
+            _run_alerts(settings)
+            raise
+        processing = result["processing"]
+        maintenance = result.get("maintenance") or {}
+        checkpoint = result.get("checkpoint") or {}
+        deferred = processing.get("deferred_reason") or maintenance.get(
+            "deferred_reason"
+        )
+        if checkpoint.get("status") == "deferred":
+            deferred = deferred or checkpoint.get("reason")
+        failed = bool(processing.get("failed")) or checkpoint.get("status") not in {
+            None,
+            "ok",
+            "clean",
+            "deferred",
+        }
+        failed = failed or maintenance.get("backup_result") not in {
+            None,
+            "ok",
+            "clean",
+            "disabled",
+            "deferred",
+        }
+        status = {
+            "checked_at": utc_now(),
+            "status": "error" if failed else ("deferred" if deferred else "ok"),
+        }
+        if deferred:
+            status["deferred_since"] = (
+                previous.get("deferred_since") or status["checked_at"]
+            )
+            status["reason"] = deferred
+        save_event(status_path, status)
+        result["alerts"] = _run_alerts(settings)
+        return result
+
+
+def _daemon_once(settings: Settings) -> dict[str, Any]:
     from .updates import maybe_check_for_update
 
     processed = process_ready(settings)
@@ -423,7 +519,10 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
     checkpoint: dict[str, Any] | None = None
     if maintenance is None and _checkpoint_due(settings, time.time()):
         checkpoint = _run_git_checkpoint(settings)
-    elif maintenance is not None:
+    elif maintenance is not None and maintenance.get("backup_result") in {
+        "ok",
+        "clean",
+    }:
         _atomic_write(
             settings.state_dir / "git-checkpoint.json",
             json.dumps(
@@ -436,6 +535,18 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
             )
             + "\n",
         )
+    updates = maybe_check_for_update(settings)
+    return {
+        "processing": asdict(processed),
+        "maintenance": maintenance,
+        "checkpoint": checkpoint,
+        "updates": updates,
+    }
+
+
+def _run_alerts(settings: Settings) -> dict[str, Any]:
+    from .alerts import run_alert_cycle
+
     try:
         alerts = run_alert_cycle(settings)
     except Exception as error:
@@ -445,11 +556,4 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
         ) as handle:
             handle.write(f"{utc_now()} {type(error).__name__}: {clean_error[:500]}\n")
         alerts = {"status": "error", "error": type(error).__name__}
-    updates = maybe_check_for_update(settings)
-    return {
-        "processing": asdict(processed),
-        "maintenance": maintenance,
-        "checkpoint": checkpoint,
-        "alerts": alerts,
-        "updates": updates,
-    }
+    return alerts

@@ -37,6 +37,11 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--no-basic-memory", action="store_true")
     setup.add_argument("--disable-update-checks", action="store_true")
     setup.add_argument(
+        "--freshness-project-days",
+        type=int,
+        help="override project review interval; otherwise preserve existing policy",
+    )
+    setup.add_argument(
         "--apply",
         action="store_true",
         help="apply the plan; without this flag setup is read-only",
@@ -154,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             install_service=not args.no_service,
             register_basic_memory=not args.no_basic_memory,
             enable_update_checks=not args.disable_update_checks,
+            freshness_project_days=args.freshness_project_days,
         )
         try:
             result = apply_setup(options) if args.apply else setup_plan(options)

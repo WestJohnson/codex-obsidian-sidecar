@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import tempfile
+import uuid
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,8 @@ def event_key(event: dict[str, Any]) -> str:
         str(event.get(key) or "")
         for key in ("session_id", "turn_id", "hook_event_name", "transcript_path")
     )
+    if not event.get("turn_id"):
+        stable += "|" + str(event.get("captured_at") or "")
     return hashlib.sha256(stable.encode("utf-8")).hexdigest()[:24]
 
 
@@ -73,20 +76,133 @@ def capture_hook(settings: Settings) -> int:
         payload = json.load(sys.stdin)
         if isinstance(payload, dict):
             if not has_usable_transcript_path(payload):
-                settings.log_dir.mkdir(parents=True, exist_ok=True)
-                with (settings.log_dir / "capture-skips.log").open(
-                    "a", encoding="utf-8"
-                ) as handle:
-                    handle.write(f"{utc_now()} missing-transcript-path\n")
+                # Preserve only routing metadata, never the hook's text or tool output.
+                record = {
+                    key: payload[key]
+                    for key in ("session_id", "turn_id", "cwd")
+                    if isinstance(payload.get(key), str)
+                }
+                record.update({"captured_at": utc_now(), "hook_event_name": "Stop"})
+                record["reason"] = "missing-transcript-path"
+                record["codex_home"] = str(_codex_home())
+                _atomic_json(
+                    settings.capture_pending_dir / f"{uuid.uuid4().hex}.json", record
+                )
                 return 0
             enqueue_event(settings, payload)
+        else:
+            raise ValueError("Hook input must be an object")
     except Exception as exc:  # A memory hook must never block the active Codex turn.
-        settings.log_dir.mkdir(parents=True, exist_ok=True)
-        with (settings.log_dir / "capture-errors.log").open(
-            "a", encoding="utf-8"
-        ) as handle:
-            handle.write(f"{utc_now()} {type(exc).__name__}: {exc}\n")
+        try:
+            _atomic_json(
+                settings.capture_failed_dir / f"{uuid.uuid4().hex}.json",
+                {
+                    "captured_at": utc_now(),
+                    "reason": "invalid-hook-input",
+                    "error": type(exc).__name__,
+                },
+            )
+        except OSError:
+            # Do not break Codex even if state storage is unavailable.
+            pass
     return 0
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+
+
+def _find_transcript(event: dict[str, Any]) -> Path | None:
+    """Resolve only an exact session ID and matching metadata, never the latest file."""
+    session_id = event.get("session_id")
+    try:
+        if str(uuid.UUID(session_id)) != session_id:
+            return None
+    except (ValueError, TypeError, AttributeError):
+        return None
+    root = Path(event.get("codex_home") or _codex_home()).expanduser().resolve()
+    matches: set[Path] = set()
+    for directory in (root / "sessions", root / "archived_sessions"):
+        for path in directory.rglob(f"*{session_id}.jsonl"):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(directory.resolve()):
+                continue
+            try:
+                with resolved.open(encoding="utf-8") as handle:
+                    header = json.loads(handle.readline(65_536))
+                metadata = header.get("payload", {})
+                if (
+                    header.get("type") != "session_meta"
+                    or metadata.get("id") != session_id
+                ):
+                    continue
+                if event.get("cwd") and metadata.get("cwd") != event["cwd"]:
+                    continue
+            except (OSError, ValueError, AttributeError):
+                continue
+            matches.add(resolved)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def recover_captures(settings: Settings, *, now: datetime | None = None) -> int:
+    """Retry incomplete hooks locally; unresolvable entries remain visible for repair."""
+    recovered = 0
+    current = now or datetime.now(UTC)
+    for path in sorted(settings.capture_pending_dir.glob("*.json")):
+        try:
+            event = load_event(path)
+            transcript = _find_transcript(event)
+            if transcript is not None:
+                # Unique recovery turn prevents a newer incomplete hook being merged
+                # into an older pending event with an earlier evidence cutoff.
+                event["turn_id"] = event.get("turn_id") or f"recovered-{path.stem}"
+                event["transcript_path"] = str(transcript)
+                enqueue_event(settings, event)
+                move_event(path, settings.state_dir / "capture-recovered")
+                recovered += 1
+                continue
+            captured_at = datetime.fromisoformat(
+                event["captured_at"].replace("Z", "+00:00")
+            )
+            if (current - captured_at).total_seconds() >= 86_400:
+                move_event(path, settings.capture_failed_dir)
+        except (OSError, ValueError, KeyError, TypeError):
+            if path.exists():
+                move_event(path, settings.capture_failed_dir, "invalid-metadata")
+    return recovered
+
+
+def capture_health(
+    settings: Settings, *, now: datetime | None = None
+) -> dict[str, int]:
+    current = (now or datetime.now(UTC)).timestamp()
+    pending = list(settings.capture_pending_dir.glob("*.json"))
+    return {
+        "pending": len(pending),
+        "stalled": sum(current - path.stat().st_mtime >= 1_800 for path in pending),
+        "failed": len(list(settings.capture_failed_dir.glob("*.json"))),
+    }
+
+
+def runtime_problem(settings: Settings, *, now: datetime | None = None) -> str | None:
+    path = settings.state_dir / "worker-status.json"
+    if not path.exists():
+        return None  # Not yet deployed, or a cloud-only runtime.
+    try:
+        state = load_event(path)
+        if state.get("status") == "error":
+            return "worker-error"
+        current = now or datetime.now(UTC)
+        checked_at = datetime.fromisoformat(state["checked_at"])
+        if (current - checked_at).total_seconds() >= 1800:
+            return "worker-stale"
+        if state.get("deferred_since"):
+            since = datetime.fromisoformat(state["deferred_since"])
+            if (current - since).total_seconds() >= 1800:
+                return "worker-stalled"
+    except (OSError, ValueError, KeyError, TypeError):
+        return "worker-status-invalid"
+    return None
 
 
 def load_event(path: Path) -> dict[str, Any]:

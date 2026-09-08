@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
+from .queueing import capture_health, runtime_problem
 from .vault import _atomic_write
 
 
@@ -31,6 +32,20 @@ def _sync_conflicts(vault: Path) -> list[str]:
 def alert_status(settings: Settings, *, now: datetime | None = None) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     alerts: list[dict[str, Any]] = []
+    captures = capture_health(settings, now=checked_at)
+    runtime_issue = runtime_problem(settings, now=checked_at)
+    if runtime_issue:
+        alerts.append(
+            {"code": runtime_issue, "title": "Obsidian local worker needs attention"}
+        )
+    if captures["failed"] or captures["stalled"]:
+        alerts.append(
+            {
+                "code": "capture-incomplete",
+                "title": "Obsidian has unresolved session captures; memory coverage is incomplete",
+                "count": captures["failed"] + captures["stalled"],
+            }
+        )
     failed = sorted(path.name for path in settings.failed_dir.glob("*.json"))
     if failed:
         alerts.append(
@@ -90,6 +105,7 @@ def alert_status(settings: Settings, *, now: datetime | None = None) -> dict[str
         "checked_at": checked_at.isoformat(),
         "healthy": not alerts,
         "alerts": alerts,
+        "capture": captures,
     }
 
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.4 - 2026-09-07
+
+- Defer local-writer contention without crashing or spending capture retries;
+  distinguish local and cloud leases and fail closed on malformed lease data.
+- Keep backup checkpoints due after contention or failure. Use process-owned
+  locks so long-running local workers do not lose their lock after 15 minutes.
+- Retain incomplete hook routing metadata privately and recover only from an
+  exact session ID and matching transcript header. Never guess the newest
+  session. Surface unresolved captures after 30 minutes and preserve failures
+  after a day; no raw hook text is retained.
+- Include unresolved captures and stale, failed, or persistently deferred
+  workers in actionable alerts and health scoring, with a maintenance-failure
+  ceiling below 80. Normal short contention is not a failure.
+- Preserve existing freshness policy during setup; expose an explicit project
+  review interval override. Enable disabled launchd jobs and avoid killing the
+  RunAtLoad worker with a second forced start.
+- Detect Basic Memory 0.23's observation-only status and explicitly complete a
+  search-only index pass. Do not mistake its compatibility `--wait` for index
+  readiness. Keep desktop Obsidian CLI optional in Linux health checks.
+
+
 ## 0.6.3 - 2026-08-19
 
 - Made the live benchmark use a stable schema-safe working-directory name so

@@ -84,6 +84,14 @@ class Settings:
     def checkpoint_dir(self) -> Path:
         return self.state_dir / "checkpoints"
 
+    @property
+    def capture_pending_dir(self) -> Path:
+        return self.state_dir / "capture-pending"
+
+    @property
+    def capture_failed_dir(self) -> Path:
+        return self.state_dir / "capture-failed"
+
     def ensure_runtime_dirs(self) -> None:
         for path in (
             self.queue_dir,

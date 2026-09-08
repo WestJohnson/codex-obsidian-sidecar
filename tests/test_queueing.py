@@ -51,7 +51,7 @@ def test_enqueue_rejects_missing_transcript_path(settings: Settings) -> None:
         enqueue_event(settings, {"session_id": "internal-session"})
 
 
-def test_capture_hook_skips_missing_transcript_path(
+def test_capture_hook_retains_missing_transcript_path_for_recovery(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -61,6 +61,6 @@ def test_capture_hook_skips_missing_transcript_path(
 
     assert capture_hook(settings) == 0
     assert not list(settings.queue_dir.glob("*.json"))
-    assert "missing-transcript-path" in (
-        settings.log_dir / "capture-skips.log"
-    ).read_text(encoding="utf-8")
+    pending = list(settings.capture_pending_dir.glob("*.json"))
+    assert len(pending) == 1
+    assert load_event(pending[0])["reason"] == "missing-transcript-path"
