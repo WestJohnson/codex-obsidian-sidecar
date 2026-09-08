@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import shlex
 import subprocess
@@ -2015,3 +2016,298 @@ def test_reconnect_contention_preserves_prior_admission_receipt(
     assert result["status"] == ("published" if connected else "offline-staged")
     assert agent.calls == 1
     assert load_event(state_path)["last_attempt_at"] == NOW.isoformat()
+
+
+@pytest.mark.parametrize("nightly_connected", [False, True])
+@pytest.mark.parametrize("retry_connected", [False, True])
+@pytest.mark.parametrize("contended", [False, True])
+def test_reconnect_revalidates_completed_nightly_obligation_under_lock(
+    settings, tmp_path, monkeypatch, nightly_connected, retry_connected, contended
+):
+    from contextlib import nullcontext
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    source = configured.vault_path / "project.md"
+    source.write_text("# Project\nOriginal source.\n")
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(status_path, {"status": "deferred", "maintenance_due": True})
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    entered, release = Event(), Event()
+
+    class PausedSync(FakeSync):
+        def snapshot(self):
+            entered.set()
+            assert release.wait(5)
+            return super().snapshot()
+
+    sync = PausedSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", retry_connected))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        retry = pool.submit(run_cloud_reconcile, configured, client=sync, now=NOW)
+        try:
+            assert entered.wait(5)
+            nightly = run_cloud_maintenance(
+                configured,
+                client=FakeSync(
+                    SyncSnapshot("idle", 0, 0, 0, 100, "valid", nightly_connected)
+                ),
+                agent=agent,
+                now=NOW,
+            )
+            assert nightly["status"] == (
+                "ok" if nightly_connected else "offline-staged"
+            )
+            assert not load_event(status_path).get("maintenance_due")
+            stage_path = configured.state_dir / "cloud-staged-report.json"
+            stage = stage_path.read_bytes() if stage_path.exists() else None
+            clocks = {
+                name: (configured.state_dir / name).read_bytes()
+                for name in ("cloud-state.json", "maintenance-success.json")
+                if (configured.state_dir / name).exists()
+            }
+            backups = sorted(configured.cloud_backup_dir.glob("*.tar.gz"))
+            source.write_text("# Project\nChanged after nightly completion.\n")
+            lock = (
+                MachineProcessLock(configured.lock_dir / "cloud-maintenance.lock")
+                if contended
+                else nullcontext()
+            )
+            with lock:
+                release.set()
+                result = retry.result(timeout=5)
+        finally:
+            release.set()
+
+    assert result["status"] == ("deferred" if contended else "stale-stage")
+    assert not load_event(status_path).get("maintenance_due")
+    reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert "last_attempt_at" not in reconnect
+    assert "last_success_at" not in reconnect
+    assert agent.calls == 1
+    assert (stage_path.read_bytes() if stage_path.exists() else None) == stage
+    assert sorted(configured.cloud_backup_dir.glob("*.tar.gz")) == backups
+    for name, content in clocks.items():
+        assert (configured.state_dir / name).read_bytes() == content
+
+
+@pytest.mark.parametrize("wait_mode", ["no-stage", "stale-stage", "waiting-for-peer"])
+@pytest.mark.parametrize("prior_error", [False, True])
+@pytest.mark.parametrize("concurrent_nightly", [False, True])
+def test_passive_publication_clears_only_obsolete_contention(
+    settings, tmp_path, monkeypatch, wait_mode, prior_error, concurrent_nightly
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.alerts import alert_status
+    from obsidian_sidecar.maintenance import inspect_vault
+    from obsidian_sidecar.queueing import load_event, runtime_problem
+
+    configured = cloud_settings(settings, tmp_path)
+    source = configured.vault_path / "project.md"
+    source.write_text("# Project\nOriginal source.\n")
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    assert (
+        run_cloud_maintenance(configured, client=FakeSync(), agent=agent, now=NOW)[
+            "status"
+        ]
+        == "ok"
+    )
+    source.write_text("# Project\nOffline revision.\n")
+    offline = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False))
+    assert (
+        run_cloud_maintenance(configured, client=offline, agent=agent, now=NOW)[
+            "status"
+        ]
+        == "offline-staged"
+    )
+    if prior_error:
+        broken = FakeSync(SyncSnapshot("idle", 1, 0, 0, 100, "valid", True))
+        with pytest.raises(RuntimeError, match="preflight failed"):
+            run_cloud_maintenance(configured, client=broken, now=NOW)
+    with LocalWriterLease(configured.vault_path, ttl_seconds=3600):
+        assert (
+            run_cloud_reconcile(configured, client=FakeSync(), now=NOW)["status"]
+            == "deferred"
+        )
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    before = load_event(status_path)
+    assert before["deferred_since"] == NOW.isoformat()
+    assert not before["maintenance_due"]
+    clocks = {
+        name: (configured.state_dir / name).read_bytes()
+        for name in ("cloud-state.json", "maintenance-success.json")
+    }
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    if wait_mode == "no-stage":
+        stage_path.unlink()
+    elif wait_mode == "stale-stage":
+        source.write_text("# Project\nChanged after staging.\n")
+    stage = stage_path.read_bytes() if stage_path.exists() else None
+    record = cloud._record_cloud_status
+    injected = False
+
+    def record_with_nightly(settings, status, **kwargs):
+        nonlocal injected
+        if concurrent_nightly and not injected and status["status"] == wait_mode:
+            injected = True
+            with MachineProcessLock(settings.lock_dir / "cloud-maintenance.lock"):
+                result = run_cloud_maintenance(settings, client=FakeSync(), now=NOW)
+                assert result["status"] == "deferred"
+        record(settings, status, **kwargs)
+
+    monkeypatch.setattr(cloud, "_record_cloud_status", record_with_nightly)
+    observed_at = NOW + timedelta(minutes=31)
+    result = run_cloud_reconcile(
+        configured,
+        client=offline if wait_mode == "waiting-for-peer" else FakeSync(),
+        now=observed_at,
+    )
+    assert result["status"] == wait_mode
+    state = load_event(status_path)
+    assert state["status"] == ("deferred" if concurrent_nightly else wait_mode)
+    assert state["failure"] == before["failure"]
+    assert state["maintenance_due"] is concurrent_nightly
+    if concurrent_nightly:
+        assert state["deferred_since"] == before["deferred_since"]
+    else:
+        assert "deferred_since" not in state
+    expected_problem = (
+        "cloud-maintenance-error"
+        if prior_error
+        else ("cloud-maintenance-stalled" if concurrent_nightly else None)
+    )
+    assert runtime_problem(configured, now=observed_at) == expected_problem
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance.runtime_problem",
+        lambda active: runtime_problem(active, now=observed_at),
+    )
+    assert inspect_vault(configured).runtime_problem == expected_problem
+    codes = {
+        item["code"] for item in alert_status(configured, now=observed_at)["alerts"]
+    }
+    assert "staged-report-stale" not in codes
+    assert ("cloud-maintenance-stalled" in codes) is (
+        concurrent_nightly and not prior_error
+    )
+    late_codes = {
+        item["code"]
+        for item in alert_status(configured, now=NOW + timedelta(hours=24))["alerts"]
+    }
+    assert ("staged-report-stale" in late_codes) is (stage is not None)
+    for name, content in clocks.items():
+        assert (configured.state_dir / name).read_bytes() == content
+    assert (stage_path.read_bytes() if stage_path.exists() else None) == stage
+    assert agent.calls == 2
+    reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert "last_attempt_at" not in reconnect
+    assert "last_success_at" not in reconnect
+
+
+@pytest.mark.parametrize("wait_mode", ["no-stage", "stale-stage", "waiting-for-peer"])
+def test_passive_publication_merges_latest_status_after_lock_wait(
+    settings, tmp_path, monkeypatch, wait_mode
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event, runtime_problem
+
+    configured = cloud_settings(settings, tmp_path)
+    source = configured.vault_path / "project.md"
+    source.write_text("# Project\n")
+    offline = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False))
+    agent = FakeAgent()
+    run_cloud_maintenance(configured, client=offline, agent=agent, now=NOW)
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    if wait_mode == "no-stage":
+        stage_path.unlink()
+    elif wait_mode == "stale-stage":
+        source.write_text("# Changed\n")
+    stage = stage_path.read_bytes() if stage_path.exists() else None
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(
+        status_path,
+        {
+            "status": "deferred",
+            "maintenance_due": False,
+            "deferred_since": NOW.isoformat(),
+        },
+    )
+    entered = Event()
+    record = cloud._record_cloud_status
+
+    def observe_record(*args, **kwargs):
+        entered.set()
+        return record(*args, **kwargs)
+
+    monkeypatch.setattr(cloud, "_record_cloud_status", observe_record)
+    with (configured.lock_dir / "cloud-status.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            probe = pool.submit(
+                run_cloud_reconcile,
+                configured,
+                client=offline if wait_mode == "waiting-for-peer" else FakeSync(),
+                now=NOW + timedelta(minutes=31),
+            )
+            try:
+                assert entered.wait(5)
+                with pytest.raises(FutureTimeout):
+                    probe.result(timeout=0.1)
+                save_event(
+                    status_path,
+                    {
+                        "status": "error",
+                        "failure": "RuntimeError",
+                        "maintenance_due": True,
+                        "deferred_since": NOW.isoformat(),
+                        "last_success_at": (NOW - timedelta(days=1)).isoformat(),
+                    },
+                )
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            assert probe.result(timeout=5)["status"] == wait_mode
+    state = load_event(status_path)
+    assert state["failure"] == "RuntimeError"
+    assert state["maintenance_due"] is True
+    assert state["deferred_since"] == NOW.isoformat()
+    assert state["last_success_at"] == (NOW - timedelta(days=1)).isoformat()
+    assert runtime_problem(configured, now=NOW + timedelta(minutes=31)) == (
+        "cloud-maintenance-error"
+    )
+    assert (stage_path.read_bytes() if stage_path.exists() else None) == stage
+    assert agent.calls == 1
+
+
+def test_persistent_publication_writer_contention_still_alerts(settings, tmp_path):
+    from obsidian_sidecar.alerts import alert_status
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    agent = FakeAgent()
+    run_cloud_maintenance(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        agent=agent,
+        now=NOW,
+    )
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    stage = stage_path.read_bytes()
+    with LocalWriterLease(configured.vault_path, ttl_seconds=3600):
+        for elapsed in (0, 31):
+            result = run_cloud_reconcile(
+                configured, client=FakeSync(), now=NOW + timedelta(minutes=elapsed)
+            )
+            assert result["status"] == "deferred"
+        state = load_event(configured.state_dir / "cloud-maintenance-status.json")
+        assert not state["maintenance_due"]
+        assert state["deferred_since"] == NOW.isoformat()
+        assert "cloud-maintenance-stalled" in {
+            item["code"]
+            for item in alert_status(configured, now=NOW + timedelta(minutes=31))[
+                "alerts"
+            ]
+        }
+    assert stage_path.read_bytes() == stage
+    assert agent.calls == 1

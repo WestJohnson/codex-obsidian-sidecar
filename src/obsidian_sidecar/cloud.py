@@ -50,6 +50,7 @@ REPLICA_IGNORED_PARTS = {".git", ".stversions", ".trash"}
 BACKUP_MANIFEST = "_obsidian-backup-manifest.json"
 SECRET_FILE_NAMES = {".env", "credentials.json", "secrets.json"}
 SECRET_FILE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".keystore"}
+PUBLICATION_WAIT_STATUSES = {"no-stage", "stale-stage", "waiting-for-peer"}
 
 
 @dataclass(frozen=True)
@@ -1580,6 +1581,17 @@ def _record_cloud_status(
             previous = load_event(status_path)
         except (OSError, ValueError):
             previous = {}
+        if status["status"] in PUBLICATION_WAIT_STATUSES:
+            status = {
+                **{key: value for key, value in previous.items() if key != "reason"},
+                **status,
+                "failure": previous.get("failure")
+                or ("error" if previous.get("status") == "error" else None),
+            }
+            if previous.get("maintenance_due") is True:
+                status["status"] = "deferred"
+            else:
+                status.pop("deferred_since", None)
         if status["status"] == "deferred":
             status = {
                 **status,
@@ -1598,6 +1610,14 @@ def _record_cloud_status(
         save_event(status_path, status)
 
 
+def _cloud_maintenance_due(settings: Settings) -> bool:
+    try:
+        state = load_event(settings.state_dir / "cloud-maintenance-status.json")
+    except (OSError, ValueError):
+        return False
+    return state.get("maintenance_due") is True
+
+
 def run_cloud_maintenance(
     settings: Settings,
     *,
@@ -1606,11 +1626,15 @@ def run_cloud_maintenance(
     now: datetime | None = None,
     force_agent: bool = False,
     maintenance_requested: bool = True,
+    retry_pending_maintenance: bool = False,
     on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     try:
         with MachineProcessLock(settings.lock_dir / "cloud-maintenance.lock"):
+            maintenance_allowed = maintenance_requested or (
+                retry_pending_maintenance and _cloud_maintenance_due(settings)
+            )
             try:
                 result = _run_cloud_maintenance(
                     settings,
@@ -1618,7 +1642,7 @@ def run_cloud_maintenance(
                     agent=agent,
                     now=checked_at,
                     force_agent=force_agent,
-                    maintenance_requested=maintenance_requested,
+                    maintenance_requested=maintenance_allowed,
                     on_admitted=on_admitted,
                 )
             except LeaseBusy:
@@ -1635,13 +1659,13 @@ def run_cloud_maintenance(
                 )
                 raise
             completed = result["status"] == "ok" or (
-                maintenance_requested
+                maintenance_allowed
                 and result["status"] in {"offline-staged", "offline-read-only"}
             )
             _record_cloud_status(
                 settings,
                 {
-                    "status": "ok" if completed else "deferred",
+                    "status": "ok" if completed else result["status"],
                     "checked_at": checked_at.isoformat(),
                     **({} if completed else {"reason": result.get("reason")}),
                 },
@@ -1723,15 +1747,11 @@ def _run_cloud_reconcile(
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     staged = _load_staged_report(settings)
-    try:
-        maintenance_state = load_event(
-            settings.state_dir / "cloud-maintenance-status.json"
-        )
-    except (OSError, ValueError):
-        maintenance_state = {}
-    maintenance_due = maintenance_state.get("maintenance_due") is True
+    maintenance_due = _cloud_maintenance_due(settings)
     if not staged and not maintenance_due:
-        return {"status": "no-stage", "checked_at": checked_at.isoformat()}
+        result = {"status": "no-stage", "checked_at": checked_at.isoformat()}
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
     state_path = _reconnect_state_path(settings)
     prior: dict[str, Any] = {}
@@ -1763,11 +1783,13 @@ def _run_cloud_reconcile(
     active_client = client or SyncthingClient.from_settings(settings)
     sync = active_client.snapshot()
     if not sync.healthy and not (maintenance_due and sync.complete):
-        return {
+        result = {
             "status": "waiting-for-peer",
             "checked_at": checked_at.isoformat(),
             "sync": asdict(sync),
         }
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
     current_snapshot, _ = source_snapshot(settings.vault_path)
     _, task_paths = load_cloud_tasks(settings)
@@ -1775,7 +1797,9 @@ def _run_cloud_reconcile(
     if not maintenance_due and not _staged_report_matches(
         staged, current_snapshot, task_fingerprints
     ):
-        return _stale_stage_result(checked_at)
+        result = _stale_stage_result(checked_at)
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
     attempt = dict(prior)
 
@@ -1792,7 +1816,8 @@ def _run_cloud_reconcile(
             settings,
             client=active_client,
             now=checked_at,
-            maintenance_requested=maintenance_due,
+            maintenance_requested=False,
+            retry_pending_maintenance=maintenance_due,
             on_admitted=record_admission,
         )
     except Exception:
