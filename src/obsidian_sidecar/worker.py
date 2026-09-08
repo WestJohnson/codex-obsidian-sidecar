@@ -20,7 +20,7 @@ from .maintenance import (
     commit_git_backup,
     indexing_problem,
     inspect_vault,
-    mark_index_pending,
+    pending_index_write,
     reindex_basic_memory,
     write_health_report,
 )
@@ -335,13 +335,13 @@ def _process_ready(
                         minimum_confidence=settings.minimum_confidence,
                     )
                     if not validation.valid:
-                        mark_index_pending(settings)
-                        write_quarantine(
-                            settings,
-                            session_id=str(packet.get("session_id") or "unknown"),
-                            reason="; ".join(validation.errors),
-                            curation=curation,
-                        )
+                        with pending_index_write(settings):
+                            write_quarantine(
+                                settings,
+                                session_id=str(packet.get("session_id") or "unknown"),
+                                reason="; ".join(validation.errors),
+                                curation=curation,
+                            )
                         raise ValueError(
                             "curation validation failed: "
                             + "; ".join(validation.errors)
@@ -367,13 +367,13 @@ def _process_ready(
                             paths, settings, packet
                         )
                         continue
-                    mark_index_pending(settings)
-                    result = write_curation(
-                        settings,
-                        curation,
-                        packet,
-                        review_required=validation.review_required,
-                    )
+                    with pending_index_write(settings):
+                        result = write_curation(
+                            settings,
+                            curation,
+                            packet,
+                            review_required=validation.review_required,
+                        )
                     if save_checkpoint(
                         settings,
                         packet,

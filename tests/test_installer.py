@@ -234,9 +234,21 @@ def test_macos_service_reload_clears_a_stale_disabled_flag(
     assert len(calls) == 3  # RunAtLoad starts once, without killing the new worker.
 
 
-@pytest.mark.parametrize("previous_disabled", [True, False, None])
+@pytest.mark.parametrize(
+    ("token", "previous_disabled"),
+    [
+        ("true", True),
+        ("false", False),
+        ("disabled", True),
+        ("enabled", False),
+        (None, None),
+    ],
+)
 def test_failed_macos_setup_restores_disabled_state_and_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previous_disabled: bool | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str | None,
+    previous_disabled: bool | None,
 ) -> None:
     options = _options(tmp_path, monkeypatch)
     options = SetupOptions(
@@ -266,7 +278,7 @@ def test_failed_macos_setup_restores_disabled_state_and_files(
         if action == "print-disabled":
             assert command[2] == "gui/501"
             records = "\n".join(
-                f'"{label}" => {str(value).lower()}'
+                f'"{label}" => {token if label == options.service_label else str(value).lower()}'
                 for label, value in disabled.items()
             )
             return subprocess.CompletedProcess(
@@ -295,7 +307,17 @@ def test_failed_macos_setup_restores_disabled_state_and_files(
     assert calls[-1][1] == ("disable" if previous_disabled else "enable")
 
 
-@pytest.mark.parametrize(("returncode", "output"), [(1, ""), (0, "invalid output")])
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [(1, ""), (0, "invalid output")]
+    + [
+        (
+            0,
+            f'disabled services = {{\n"{installer.DEFAULT_SERVICE_LABEL}" => {token}\n}}',
+        )
+        for token in ("unknown", "true-ish", "disabled-ish", "")
+    ],
+)
 def test_macos_setup_requires_readable_disabled_state_before_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, output: str
 ) -> None:

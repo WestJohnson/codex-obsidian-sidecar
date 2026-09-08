@@ -245,6 +245,8 @@ def save_event(path: Path, event: dict[str, Any]) -> None:
 
 
 def ready_groups(settings: Settings, *, force: bool = False) -> list[list[Path]]:
+    from .transcript import resolve_session_event
+
     now = datetime.now(UTC).timestamp()
     by_session: dict[tuple[str, str], list[Path]] = defaultdict(list)
     cutoffs: dict[Path, datetime] = {}
@@ -263,8 +265,11 @@ def ready_groups(settings: Settings, *, force: bool = False) -> list[list[Path]]
             cutoffs[path] = capture_cutoff(event)
             if not has_usable_transcript_path(event):
                 raise ValueError("Missing transcript path")
+            identity = event.get("session_id")
+            if not isinstance(identity, str) or not identity.strip():
+                session_id = resolve_session_event(event)["session_id"]
             transcript = str(Path(event["transcript_path"]).expanduser().resolve())
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             cutoffs[path] = datetime.min.replace(tzinfo=UTC)
             transcript = f"invalid:{path.name}"
         by_session[session_id, transcript].append(path)

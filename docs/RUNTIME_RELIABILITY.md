@@ -54,8 +54,11 @@ tail status from the same read, retaining the existing last-16-message and
 character limits. An unfinished JSONL tail remains queued until the complete
 record is covered, including when it finishes while a packet is being built.
 Transcript-only hooks resolve their canonical session header and missing working
-directory before checkpoint selection and retirement. Incremental packets retain
-that Git and artifact base while preserving explicit hook routing values.
+directory before checkpoint selection and retirement. Hooks with an explicit
+session ID also recover a missing working directory from the validated header.
+Canonical identity is resolved before grouping and debounce; each capture keeps
+its original cutoff. Incremental packets retain that Git and artifact base while
+preserving explicit hook routing values.
 
 ## Health And Alerts
 
@@ -89,6 +92,10 @@ verifies retrieval under the platform's integration requirements.
 without exception messages. Pending or failed indexing remains actionable even
 if the worker exits after the note, checkpoint, and queue retirement are committed.
 Only confirmed indexing success clears that obligation.
+Capture writes and every indexing caller share a local OS-held indexing lock.
+An index operation completes its state update before a later capture marks new
+work pending, and indexing waits for an in-progress capture write to finish.
+The lock is released on process exit and is separate from the shared writer lease.
 The local worker retries indexing on an idle tick under its writer lease,
 without repeating curation or advancing the checkpoint. A failed full search
 rebuild retains full mode for its retry. `process` exits nonzero when indexing

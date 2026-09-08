@@ -424,8 +424,15 @@ def test_packet_records_lightweight_model_provenance(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("explicit_cwd", [False, True])
+@pytest.mark.parametrize(
+    "explicit_session", [None, "fixture-session-001", "explicit-session"]
+)
 def test_transcript_only_incremental_routing_preserves_git_and_artifact_base(
-    transcript_path: Path, tmp_path: Path, valid_curation: dict, explicit_cwd: bool
+    transcript_path: Path,
+    tmp_path: Path,
+    valid_curation: dict,
+    explicit_cwd: bool,
+    explicit_session: str | None,
 ) -> None:
     projects = [tmp_path / "header project", tmp_path / "event project"]
     for index, project in enumerate(projects):
@@ -444,6 +451,8 @@ def test_transcript_only_incremental_routing_preserves_git_and_artifact_base(
         "turn_id": "explicit-turn",
     }
     selected = int(explicit_cwd)
+    if explicit_session:
+        event["session_id"] = explicit_session
     if explicit_cwd:
         event["cwd"] = str(projects[selected])
     first = build_curation_packet(event)
@@ -466,7 +475,7 @@ def test_transcript_only_incremental_routing_preserves_git_and_artifact_base(
     )
 
     assert packet["checkpoint"]["mode"] == "incremental"
-    assert packet["session_id"] == "fixture-session-001"
+    assert packet["session_id"] == (explicit_session or "fixture-session-001")
     assert packet["turn_id"] == "explicit-turn"
     assert packet["cwd"] == str(projects[selected])
     assert packet["artifacts"] == [

@@ -513,8 +513,19 @@ def _launchd_disabled(options: SetupOptions) -> bool:
     block = re.search(r"disabled services\s*=\s*\{(.*?)\}", result.stdout, re.DOTALL)
     if block is None:
         raise RuntimeError("Could not parse launchd disabled state")
-    states = dict(re.findall(r'"([^"]+)"\s*=>\s*(true|false)', block.group(1)))
-    return states.get(options.service_label) == "true"
+    target = re.search(
+        rf'"{re.escape(options.service_label)}"\s*=>\s*([^\n,}}]*)', block.group(1)
+    )
+    if target is None:
+        if f'"{options.service_label}"' in block.group(1):
+            raise RuntimeError("Could not parse launchd disabled state for target")
+        return False
+    value = target.group(1).strip()
+    if value in {"true", "disabled"}:
+        return True
+    if value in {"false", "enabled"}:
+        return False
+    raise RuntimeError("Unrecognized launchd disabled state for target")
 
 
 def _reload_service(options: SetupOptions) -> dict[str, Any]:

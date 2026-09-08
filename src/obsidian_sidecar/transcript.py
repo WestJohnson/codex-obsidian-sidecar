@@ -417,7 +417,8 @@ def collect_git_evidence(cwd: Path) -> list[dict[str, str]]:
 def resolve_session_event(event: dict[str, Any]) -> dict[str, Any]:
     """Resolve a transcript-only hook's identity before checkpoint selection."""
     session_id = event.get("session_id")
-    if isinstance(session_id, str) and session_id.strip():
+    has_identity = isinstance(session_id, str) and bool(session_id.strip())
+    if has_identity and event.get("cwd"):
         return event
     path = event.get("transcript_path")
     if not isinstance(path, str) or not path.strip():
@@ -429,14 +430,14 @@ def resolve_session_event(event: dict[str, Any]) -> dict[str, Any]:
     payload = header.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("Transcript has invalid session metadata")
-    session_id = payload.get("session_id") or payload.get("id")
-    if not isinstance(session_id, str) or not session_id.strip():
+    header_session_id = payload.get("session_id") or payload.get("id")
+    if not isinstance(header_session_id, str) or not header_session_id.strip():
         raise ValueError("Transcript has no canonical session identity")
     metadata = _session_metadata({}, payload, header.get("timestamp"))
     return {
         **event,
         **{key: value for key, value in metadata.items() if not event.get(key)},
-        "session_id": session_id,
+        "session_id": session_id if has_identity else header_session_id,
     }
 
 

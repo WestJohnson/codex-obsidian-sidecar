@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -226,7 +229,30 @@ def indexing_problem(settings: Settings) -> str | None:
     return "basic-memory-index-error"
 
 
+@contextmanager
+def _index_state_lock(settings: Settings) -> Iterator[None]:
+    settings.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (settings.lock_dir / "index-state.flock").open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def pending_index_write(settings: Settings) -> Iterator[None]:
+    with _index_state_lock(settings):
+        _mark_index_pending(settings)
+        yield
+
+
 def mark_index_pending(settings: Settings) -> None:
+    with pending_index_write(settings):
+        pass
+
+
+def _mark_index_pending(settings: Settings) -> None:
     path = settings.state_dir / "index-status.json"
     try:
         previous = load_event(path)
@@ -243,6 +269,11 @@ def mark_index_pending(settings: Settings) -> None:
 
 
 def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
+    with _index_state_lock(settings):
+        return _record_index_result(settings, full=full)
+
+
+def _record_index_result(settings: Settings, *, full: bool) -> str:
     path = settings.state_dir / "index-status.json"
     try:
         previous = load_event(path)
