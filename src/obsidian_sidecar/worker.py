@@ -4,6 +4,7 @@ import fcntl
 import json
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +34,7 @@ from .queueing import (
     utc_now,
 )
 from .security import redact_text
-from .transcript import _cursor_at_cutoff, build_curation_packet
+from .transcript import _cursor_at_cutoff, build_curation_packet, resolve_session_event
 from .validation import normalize_curation_metadata, validate_curation
 from .vault import write_curation, write_quarantine
 from .vault import _atomic_write
@@ -118,6 +119,10 @@ def _record_failure(paths: list[Path], settings: Settings, error: Exception) -> 
 def _checkpoint_coverage(
     settings: Settings, event: dict[str, Any]
 ) -> dict[str, int] | None:
+    try:
+        event = resolve_session_event(event)
+    except (OSError, ValueError, TypeError):
+        return None
     session_id = event.get("session_id")
     transcript_value = event.get("transcript_path")
     captured_at = event.get("captured_at")
@@ -171,7 +176,12 @@ def _cursor_coverage(
     ):
         return None
 
-    event_boundary = _cursor_at_cutoff(transcript_path, event["captured_at"])
+    try:
+        event_boundary = _cursor_at_cutoff(
+            transcript_path, event["captured_at"], require_complete=True
+        )
+    except ValueError:
+        return None
     if checkpoint_offset < event_boundary:
         return None
     return {
@@ -283,6 +293,7 @@ def _process_ready(
                     _mark_group(paths, settings, "failed")
                     continue
                 try:
+                    event = resolve_session_event(event)
                     session_id = str(event.get("session_id") or "unknown")
                     checkpoint = load_checkpoint(settings, session_id)
                     if checkpoint is None and settings.checkpoint_enabled:
@@ -433,9 +444,20 @@ def _run_maintenance_unfenced(
 
 def run_maintenance(settings: Settings, *, backup: bool = True) -> dict[str, Any]:
     try:
-        return _run_maintenance(settings, backup=backup)
+        result = _run_maintenance(settings, backup=backup)
     except LeaseBusy as error:
         return _deferred_maintenance(settings, error.reason)
+    if (
+        not result.get("deferred_reason")
+        and result.get("critical_failures") == 0
+        and result.get("reindex_result") in {"ok", "not-required"}
+        and result.get("backup_result") in {"ok", "clean", "disabled"}
+    ):
+        save_event(
+            settings.state_dir / "maintenance-success.json",
+            {"schema": 1, "completed_at": utc_now()},
+        )
+    return result
 
 
 def _run_maintenance(settings: Settings, *, backup: bool = True) -> dict[str, Any]:
@@ -581,9 +603,8 @@ def _daemon_once(settings: Settings) -> dict[str, Any]:
     from .updates import maybe_check_for_update
 
     processed = process_ready(settings)
-    health_path = settings.state_dir / "health.json"
     maintenance: dict[str, Any] | None = None
-    if not health_path.exists() or time.time() - health_path.stat().st_mtime >= 86_400:
+    if _maintenance_due(settings):
         maintenance = run_maintenance(settings)
     checkpoint: dict[str, Any] | None = None
     if maintenance is None and _checkpoint_due(settings, time.time()):
@@ -611,6 +632,18 @@ def _daemon_once(settings: Settings) -> dict[str, Any]:
         "checkpoint": checkpoint,
         "updates": updates,
     }
+
+
+def _maintenance_due(settings: Settings) -> bool:
+    try:
+        state = load_event(settings.state_dir / "maintenance-success.json")
+        completed = datetime.fromisoformat(state["completed_at"])
+        if completed.tzinfo is None:
+            return True
+        age = time.time() - completed.timestamp()
+        return age < 0 or age >= 86_400
+    except (OSError, ValueError, TypeError, KeyError):
+        return True
 
 
 def _run_alerts(settings: Settings) -> dict[str, Any]:

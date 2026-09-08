@@ -92,7 +92,11 @@ def test_capture_recovers_only_exact_session(
 @pytest.mark.parametrize(
     "mismatch",
     [
-        "session", "cwd", "ambiguous", "symlink", "directory-symlink",
+        "session",
+        "cwd",
+        "ambiguous",
+        "symlink",
+        "directory-symlink",
         "archived-directory-symlink",
     ],
 )
@@ -115,7 +119,9 @@ def test_capture_does_not_guess(settings, monkeypatch, tmp_path, mismatch):
         outside = make_transcript(tmp_path / "outside")
         root.mkdir()
         directory = (
-            "archived_sessions" if mismatch == "archived-directory-symlink" else "sessions"
+            "archived_sessions"
+            if mismatch == "archived-directory-symlink"
+            else "sessions"
         )
         (root / directory).symlink_to(outside.parent, target_is_directory=True)
     recovered = recover_captures(settings)
@@ -133,8 +139,7 @@ def test_capture_does_not_guess(settings, monkeypatch, tmp_path, mismatch):
             ],
         }
         (evidence_dir / "capture-directory-symlink.json").write_text(
-            json.dumps(evidence, indent=2).replace(str(tmp_path), "<TEST_ROOT>")
-            + "\n"
+            json.dumps(evidence, indent=2).replace(str(tmp_path), "<TEST_ROOT>") + "\n"
         )
     assert recovered == 0
     assert not list(settings.queue_dir.glob("*.json"))
@@ -647,6 +652,10 @@ def test_idle_tick_retries_failed_indexing_without_recuration(
     monkeypatch.setattr(maintenance, "_command_status", lambda *_: "ok")
     monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: RecordingCurator())
     save_event(settings.state_dir / "health.json", {"score": 100})
+    save_event(
+        settings.state_dir / "maintenance-success.json",
+        {"completed_at": datetime.now(UTC).isoformat()},
+    )
     save_event(settings.state_dir / "git-checkpoint.json", {"status": "ok"})
     enqueue_event(
         settings,
@@ -707,3 +716,179 @@ def test_full_index_retry_preserves_full_mode_and_private_failure_state(
     assert process_ready(settings).reindex_result == "ok"
     assert calls == [True, True]
     assert alert_status(settings)["healthy"]
+
+
+def test_incomplete_tail_cannot_retire_capture(settings, transcript_path):
+    from obsidian_sidecar import worker
+    from obsidian_sidecar.checkpoints import checkpoint_path
+
+    session = "fixture-session-001"
+    content = transcript_path.read_bytes()
+    tail = b'{"type":"event_msg","timestamp":"2026-07-14T08:02:00Z","payload":{}}\n'
+    transcript_path.write_bytes(content + tail[:25])
+    event = enqueue_event(
+        settings,
+        {
+            "session_id": session,
+            "transcript_path": str(transcript_path),
+            "captured_at": "2026-07-14T08:03:00Z",
+        },
+    )
+    checkpoint = {
+        "version": 1,
+        "session_id": session,
+        "curation": {},
+        "update_count": 1,
+        "captured_at": "2026-07-14T08:03:00Z",
+        "cursor": {
+            "transcript_path": str(transcript_path),
+            "byte_offset": len(content),
+        },
+    }
+    save_event(checkpoint_path(settings, session), checkpoint)
+    assert worker._retire_covered_events([event], settings, {}) == 0
+    assert event.exists()
+    transcript_path.write_bytes(content + tail)
+    assert worker._retire_covered_events([event], settings, {}) == 0
+    checkpoint["cursor"]["byte_offset"] = transcript_path.stat().st_size
+    checkpoint["update_count"] = 2
+    save_event(checkpoint_path(settings, session), checkpoint)
+    assert worker._retire_covered_events([event], settings, {}) == 1
+    assert not event.exists()
+
+
+def test_transcript_only_capture_uses_canonical_checkpoint(
+    settings, transcript_path, valid_curation, monkeypatch
+):
+    from obsidian_sidecar import worker
+    from obsidian_sidecar.checkpoints import load_checkpoint
+    from obsidian_sidecar.transcript import build_curation_packet
+
+    monkeypatch.setattr(worker, "reindex_basic_memory", lambda _: "ok")
+    event = {
+        "transcript_path": str(transcript_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, event)
+    first = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    assert first.processed_events == 1
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert checkpoint is not None
+    assert not list(settings.queue_dir.glob("*.json"))
+    packet = build_curation_packet(event, checkpoint=checkpoint)
+    assert packet["session_id"] == "fixture-session-001"
+    assert packet["checkpoint"]["mode"] == "incremental"
+    assert process_ready(settings).groups_seen == 0
+
+
+def test_index_refresh_cannot_postpone_daily_maintenance(settings, monkeypatch):
+    from obsidian_sidecar import worker
+
+    calls = []
+    stale = datetime.now(UTC) - timedelta(hours=25)
+    save_event(
+        settings.state_dir / "maintenance-success.json",
+        {"completed_at": stale.isoformat()},
+    )
+    save_event(settings.state_dir / "health.json", {"score": 100})
+    monkeypatch.setattr(
+        worker, "process_ready", lambda _: worker.ProcessSummary(reindex_result="ok")
+    )
+    monkeypatch.setattr(
+        worker,
+        "inspect_vault",
+        lambda *_a, **_k: VaultHealth(checked_at=datetime.now(UTC).isoformat()),
+    )
+
+    def maintain(*_a, **_k):
+        calls.append(True)
+        return {
+            "critical_failures": 0,
+            "reindex_result": "ok",
+            "backup_result": "disabled",
+        }
+
+    monkeypatch.setattr(worker, "_run_maintenance", maintain)
+    assert daemon_once(settings)["maintenance"] is not None
+    # More successful capture/index observations refresh health, not the daily clock.
+    clock = (settings.state_dir / "maintenance-success.json").read_bytes()
+    assert daemon_once(settings)["maintenance"] is None
+    assert len(calls) == 1
+    assert (settings.state_dir / "maintenance-success.json").read_bytes() == clock
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"deferred_reason": "local-writer-active", "backup_result": "deferred"},
+        {
+            "critical_failures": 0,
+            "reindex_result": "ok",
+            "backup_result": "unavailable",
+        },
+        {
+            "critical_failures": 0,
+            "reindex_result": "error",
+            "backup_result": "disabled",
+        },
+    ],
+)
+def test_incomplete_maintenance_stays_due(settings, monkeypatch, result):
+    from obsidian_sidecar import worker
+
+    monkeypatch.setattr(worker, "_run_maintenance", lambda *_a, **_k: result)
+    run_maintenance(settings)
+    assert worker._maintenance_due(settings)
+    assert not (settings.state_dir / "maintenance-success.json").exists()
+
+
+def test_active_index_owner_does_not_raise_failure_alert(
+    settings, transcript_path, monkeypatch
+):
+    from obsidian_sidecar import maintenance
+
+    save_event(
+        settings.state_dir / "maintenance-success.json",
+        {"completed_at": datetime.now(UTC).isoformat()},
+    )
+    save_event(
+        settings.state_dir / "index-status.json",
+        {
+            "status": "running",
+            "checked_at": datetime.now(UTC).isoformat(),
+            "pid": os.getpid(),
+        },
+    )
+    enqueue_event(
+        settings,
+        {"session_id": "fixture-session-001", "transcript_path": str(transcript_path)},
+    )
+    with LocalWriterLease(settings.vault_path, ttl_seconds=600):
+        assert maintenance.indexing_problem(settings) is None
+        daemon_once(settings)
+        assert (
+            load_event(settings.state_dir / "worker-status.json")["status"]
+            == "deferred"
+        )
+        assert alert_status(settings)["healthy"]
+
+    def dead_owner(*_args):
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(maintenance.os, "kill", dead_owner)
+    assert maintenance.indexing_problem(settings) == "basic-memory-index-error"
+    assert not alert_status(settings)["healthy"]
+
+
+def test_abandoned_index_state_is_actionable(settings):
+    from obsidian_sidecar.maintenance import indexing_problem
+
+    save_event(
+        settings.state_dir / "index-status.json",
+        {
+            "status": "running",
+            "checked_at": (datetime.now(UTC) - timedelta(minutes=11)).isoformat(),
+            "pid": os.getpid(),
+        },
+    )
+    assert indexing_problem(settings) == "basic-memory-index-error"

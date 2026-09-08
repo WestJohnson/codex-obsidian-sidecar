@@ -21,6 +21,12 @@
   readiness. Keep desktop Obsidian CLI optional in Linux health checks.
 - Require every local benchmark case to pass and retain acceptance results
   when report publication is deferred; allow publication to be retried alone.
+- Keep daily maintenance independent of health refreshes and retry deferred
+  nightly maintenance through the existing reconnect timer, even without a
+  staged report. Preserve sync-error reporting during real failures.
+- Retain unfinished transcript tails, resolve transcript-only session identity
+  before checkpoint lookup, and distinguish active from interrupted indexing.
+- Include the testing, operations, and cloud-sync guides in offline bundles.
 
 ## 0.6.3 - 2026-08-19
 

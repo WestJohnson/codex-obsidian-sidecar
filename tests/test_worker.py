@@ -550,7 +550,9 @@ def test_daemon_creates_hourly_dirty_git_checkpoint(settings: Settings) -> None:
         git_checkpoint_interval_seconds=3600,
         alerts_enabled=False,
     )
-    (configured.state_dir / "health.json").write_text("{}", encoding="utf-8")
+    (configured.state_dir / "maintenance-success.json").write_text(
+        json.dumps({"completed_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
+    )
     note = configured.vault_path / "manual-note.md"
     note.write_text("# Manual note\n", encoding="utf-8")
     result = daemon_once(configured)

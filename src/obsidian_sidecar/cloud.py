@@ -1193,7 +1193,14 @@ def run_cloud_benchmark(
 
 
 def _check_cloud_contention(before: dict[str, Any]) -> None:
-    if not before["replica_complete"] or before["conflicts"]:
+    sync = before["sync"]
+    if (
+        before["conflicts"]
+        or sync["errors"] != 0
+        or sync["remote_state"] not in {"valid", "unknown", ""}
+        or sync["state"]
+        not in {"idle", "syncing", "scanning", "scan-waiting", "sync-waiting"}
+    ):
         return
     for key, path in (("local_writer", LOCAL_WRITER_PATH), ("lease", LEASE_PATH)):
         if before[key]["active"]:
@@ -1538,6 +1545,7 @@ def run_cloud_maintenance(
                 "deferred_since": previous.get("deferred_since")
                 or checked_at.isoformat(),
                 "failure": previous.get("failure"),
+                "maintenance_due": True,
             },
         )
         return result
@@ -1549,6 +1557,7 @@ def run_cloud_maintenance(
                 "checked_at": checked_at.isoformat(),
                 "error": type(error).__name__,
                 "failure": type(error).__name__,
+                "maintenance_due": previous.get("maintenance_due") is True,
             },
         )
         raise
@@ -1591,10 +1600,17 @@ def run_cloud_reconcile(
     client: SyncClient | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Publish a fingerprint-equal offline stage shortly after peer reconnection."""
+    """Publish an offline stage or retry previously deferred maintenance."""
     checked_at = now or datetime.now(UTC)
     staged = _load_staged_report(settings)
-    if not staged:
+    try:
+        maintenance_state = load_event(
+            settings.state_dir / "cloud-maintenance-status.json"
+        )
+    except (OSError, ValueError):
+        maintenance_state = {}
+    maintenance_due = maintenance_state.get("maintenance_due") is True
+    if not staged and not maintenance_due:
         return {"status": "no-stage", "checked_at": checked_at.isoformat()}
 
     state_path = _reconnect_state_path(settings)
@@ -1626,7 +1642,7 @@ def run_cloud_reconcile(
 
     active_client = client or SyncthingClient.from_settings(settings)
     sync = active_client.snapshot()
-    if not sync.healthy:
+    if not sync.healthy and not (maintenance_due and sync.complete):
         return {
             "status": "waiting-for-peer",
             "checked_at": checked_at.isoformat(),
@@ -1636,7 +1652,9 @@ def run_cloud_reconcile(
     current_snapshot, _ = source_snapshot(settings.vault_path)
     _, task_paths = load_cloud_tasks(settings)
     task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
-    if not _staged_report_matches(staged, current_snapshot, task_fingerprints):
+    if not maintenance_due and not _staged_report_matches(
+        staged, current_snapshot, task_fingerprints
+    ):
         return {
             "status": "stale-stage",
             "checked_at": checked_at.isoformat(),

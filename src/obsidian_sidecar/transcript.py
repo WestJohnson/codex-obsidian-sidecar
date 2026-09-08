@@ -54,9 +54,7 @@ def _session_metadata(
     }
 
 
-def _turn_metadata(
-    current: dict[str, Any], payload: dict[str, Any]
-) -> dict[str, Any]:
+def _turn_metadata(current: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     return {
         **current,
         "turn_id": payload.get("turn_id") or current.get("turn_id"),
@@ -88,9 +86,7 @@ def _model_provenance(
         else {}
     )
     values = {
-        "model": event.get("model")
-        or metadata.get("model")
-        or previous.get("model"),
+        "model": event.get("model") or metadata.get("model") or previous.get("model"),
         "effort": metadata.get("reasoning_effort") or previous.get("effort"),
         "provider": metadata.get("model_provider") or previous.get("provider"),
         "harness": metadata.get("originator")
@@ -151,9 +147,7 @@ def extract_messages(
             if not isinstance(payload, dict):
                 continue
             if event.get("type") == "session_meta":
-                metadata = _session_metadata(
-                    metadata, payload, event.get("timestamp")
-                )
+                metadata = _session_metadata(metadata, payload, event.get("timestamp"))
                 continue
             if event.get("type") == "turn_context":
                 metadata = _turn_metadata(metadata, payload)
@@ -210,7 +204,9 @@ def _past_cutoff(value: str | None, cutoff: str | None) -> bool:
         return False
 
 
-def _cursor_at_cutoff(transcript_path: Path, cutoff: str | None) -> int:
+def _cursor_at_cutoff(
+    transcript_path: Path, cutoff: str | None, *, require_complete: bool = False
+) -> int:
     """Return the first byte not belonging to the completed hook event."""
 
     with transcript_path.open("rb") as handle:
@@ -223,6 +219,10 @@ def _cursor_at_cutoff(transcript_path: Path, cutoff: str | None) -> int:
                 event = json.loads(raw_line.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 if not raw_line.endswith(b"\n"):
+                    if require_complete:
+                        raise ValueError(
+                            "Transcript cutoff contains an unfinished record"
+                        )
                     return line_start
                 continue
             if _past_cutoff(event.get("timestamp"), cutoff):
@@ -284,9 +284,7 @@ def extract_message_delta(
                 cursor_end = line_end
                 continue
             if event.get("type") == "session_meta":
-                metadata = _session_metadata(
-                    metadata, payload, event.get("timestamp")
-                )
+                metadata = _session_metadata(metadata, payload, event.get("timestamp"))
                 cursor_end = line_end
                 continue
             if event.get("type") == "turn_context":
@@ -389,6 +387,27 @@ def collect_git_evidence(cwd: Path) -> list[dict[str, str]]:
     return evidence
 
 
+def resolve_session_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a transcript-only hook's identity before checkpoint selection."""
+    session_id = event.get("session_id")
+    if isinstance(session_id, str) and session_id.strip():
+        return event
+    path = event.get("transcript_path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Hook event has no transcript_path")
+    with Path(path).expanduser().open(encoding="utf-8") as handle:
+        header = json.loads(handle.readline(65_536))
+    if not isinstance(header, dict) or header.get("type") != "session_meta":
+        raise ValueError("Transcript has no session metadata header")
+    payload = header.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Transcript has invalid session metadata")
+    session_id = payload.get("session_id") or payload.get("id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        raise ValueError("Transcript has no canonical session identity")
+    return {**event, "session_id": session_id}
+
+
 def build_curation_packet(
     event: dict[str, Any],
     *,
@@ -401,25 +420,22 @@ def build_curation_packet(
     transcript_path = Path(transcript_value).expanduser()
     if not transcript_path.is_file():
         raise FileNotFoundError(f"Transcript not found: {transcript_path}")
+    event = resolve_session_event(event)
 
     cutoff = str(event.get("captured_at") or "") or None
     checkpoint_text = ""
     checkpoint_mode = "baseline"
     has_more = False
-    valid_checkpoint = (
-        isinstance(checkpoint, dict)
-        and checkpoint.get("session_id")
-        in {event.get("session_id"), None, ""}
-    )
+    valid_checkpoint = isinstance(checkpoint, dict) and checkpoint.get(
+        "session_id"
+    ) in {event.get("session_id"), None, ""}
     if valid_checkpoint:
         from .checkpoints import checkpoint_evidence
 
         checkpoint_text = checkpoint_evidence(
             checkpoint, maximum_chars=checkpoint_max_evidence_chars
         )
-        maximum_delta_chars = max(
-            4_000, MAX_PACKET_CHARS - len(checkpoint_text)
-        )
+        maximum_delta_chars = max(4_000, MAX_PACKET_CHARS - len(checkpoint_text))
         try:
             batch = extract_message_delta(
                 transcript_path,
@@ -443,9 +459,7 @@ def build_curation_packet(
             }
             checkpoint_mode = "recovery"
     else:
-        metadata, messages = extract_messages(
-            transcript_path, before_timestamp=cutoff
-        )
+        metadata, messages = extract_messages(transcript_path, before_timestamp=cutoff)
         cursor = {
             "transcript_path": str(transcript_path),
             "byte_offset": _cursor_at_cutoff(transcript_path, cutoff),
@@ -468,14 +482,14 @@ def build_curation_packet(
         )
     evidence.extend(
         [
-        {
-            "id": message.source_id,
-            "kind": "conversation",
-            "role": message.role,
-            "text": message.text,
-            "timestamp": message.timestamp,
-        }
-        for message in messages
+            {
+                "id": message.source_id,
+                "kind": "conversation",
+                "role": message.role,
+                "text": message.text,
+                "timestamp": message.timestamp,
+            }
+            for message in messages
         ]
     )
     for index, item in enumerate(collect_git_evidence(cwd), start=1):

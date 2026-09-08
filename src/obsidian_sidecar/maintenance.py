@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -202,7 +203,27 @@ def indexing_problem(settings: Settings) -> str | None:
         return None
     except (OSError, ValueError):
         return "index-status-invalid"
-    return None if state.get("status") == "ok" else "basic-memory-index-error"
+    if state.get("status") == "ok":
+        return None
+    if state.get("status") == "running":
+        try:
+            started = datetime.fromisoformat(state["checked_at"])
+            pid = state["pid"]
+            if (
+                started.tzinfo is not None
+                and 0 <= (datetime.now(UTC) - started).total_seconds() < 600
+                and isinstance(pid, int)
+                and not isinstance(pid, bool)
+                and pid > 0
+            ):
+                try:
+                    os.kill(pid, 0)
+                except PermissionError:
+                    pass  # A live owner may belong to another local user.
+                return None
+        except (KeyError, TypeError, ValueError, OSError, OverflowError):
+            pass
+    return "basic-memory-index-error"
 
 
 def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
@@ -212,7 +233,12 @@ def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
     except (OSError, ValueError):
         previous = {}
     full = full or (previous.get("status") != "ok" and previous.get("full") is True)
-    state = {"checked_at": utc_now(), "status": "running", "full": full}
+    state = {
+        "checked_at": utc_now(),
+        "status": "running",
+        "full": full,
+        "pid": os.getpid(),
+    }
     save_event(path, state)
     try:
         result = _reindex_basic_memory(settings, full=full)

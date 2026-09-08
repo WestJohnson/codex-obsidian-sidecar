@@ -241,6 +241,49 @@ def test_cloud_cli_returns_success_for_expected_contention(
     assert json.loads(capsys.readouterr().out)["status"] == "deferred"
 
 
+@pytest.mark.parametrize("state", ["syncing", "scanning", "idle"])
+def test_progressing_replication_with_writer_is_deferred(settings, tmp_path, state):
+    configured = cloud_settings(settings, tmp_path)
+    agent = FakeAgent()
+    client = FakeSync(SyncSnapshot(state, 0, 2, 100, 90, "valid", True))
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        result = run_cloud_maintenance(configured, client=client, agent=agent)
+    assert result["status"] == "deferred"
+    assert agent.calls == 0
+    assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+
+
+@pytest.mark.parametrize("connected", [True, False])
+def test_deferred_nightly_without_stage_retries_from_reconciler(
+    settings, tmp_path, monkeypatch, connected
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    (configured.vault_path / "project.md").write_text(
+        "# Retry the deferred nightly job\n"
+    )
+    sync = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", connected))
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        assert run_cloud_maintenance(configured, client=sync)["status"] == "deferred"
+        assert run_cloud_reconcile(configured, client=sync)["status"] == "deferred"
+        assert not (configured.state_dir / "cloud-staged-report.json").exists()
+        state = load_event(configured.state_dir / "cloud-reconnect-state.json")
+        assert "last_attempt_at" not in state
+    assert agent.calls == 0
+    recovered = run_cloud_reconcile(configured, client=sync)
+    assert recovered["status"] == ("published" if connected else "offline-staged")
+    assert agent.calls == 1
+    assert list(configured.cloud_backup_dir.glob("*.tar.gz"))
+    state = load_event(configured.state_dir / "cloud-maintenance-status.json")
+    assert not state.get("maintenance_due")
+    run_cloud_reconcile(configured, client=sync)
+    assert agent.calls == 1
+
+
 def test_sync_snapshot_distinguishes_complete_offline_replica_from_healthy_sync() -> (
     None
 ):

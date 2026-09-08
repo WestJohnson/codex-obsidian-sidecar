@@ -11,8 +11,15 @@
   but mixed-version long-running workers must not overlap the installation.
 - Syncthing is eventually consistent. Shared files provide cooperative fencing,
   not a linearizable distributed mutex. Do not break live leases, force
-  simultaneous writers on offline replicas, or claim this change guarantees
+    simultaneous writers on offline replicas, or claim this change guarantees
   distributed mutual exclusion. Cloud maintenance retains its sync-settle checks.
+- Daily local maintenance is scheduled from `maintenance-success.json`, not
+  the frequently refreshed health observation. Failed or deferred work stays
+  due. The first upgraded tick without this completion record runs maintenance.
+- Deferred cloud maintenance remains due in private state. The existing
+  reconnect timer retries it even without a staged report. Ordinary writer
+  overlap while replication progresses does not consume failure retries;
+  actual sync errors and conflicts remain failures.
 
 ## Incomplete captures
 
@@ -40,6 +47,11 @@ only the routing metadata, correct the exact-session routing problem, and
 preserve the original capture time and audit record before retrying. Do not
 substitute the newest transcript or mark a queued recovery as completed
 curation. Normal retry handling is in [Operations](OPERATIONS.md#recovery).
+
+Capture retirement requires a complete transcript cutoff covered by a validated
+checkpoint. An unfinished JSONL tail remains queued until the complete record
+is covered. Transcript-only hooks resolve their canonical session header before
+checkpoint selection and retirement, avoiding repeated baseline curation.
 
 ## Health And Alerts
 
@@ -76,11 +88,15 @@ without repeating curation or advancing the checkpoint. A failed full search
 rebuild retains full mode for its retry. `process` exits nonzero when indexing
 fails; `daemon-once` can exit zero after a handled failure, so inspect its result,
 worker status, and `alert-status` as well as the service exit code.
+Fresh running indexing with a live local owner is not reported as failed.
+Missing owners and operations still running after ten minutes are actionable,
+so interrupted jobs remain eligible for recovery.
 
 ## Upgrade And Rollback
 
-Keep the 0.6.4 candidate private. This procedure does not require a public tag,
-website publication, or release-index promotion.
+Verify candidates before promotion. Public releases follow the signed-tag,
+CI-provenance, immutable-artifact, and update-index procedure in
+[Updates](UPDATES.md#maintainer-flow); installation alone does not publish them.
 
 1. Capture package version, config, hooks, service state, queue counts, and vault
    backup. Suspend only Sidecar scheduling and wait for active work to finish:

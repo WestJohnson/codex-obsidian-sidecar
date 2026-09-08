@@ -62,9 +62,12 @@ def test_cli_capture_recovery_retry_and_policy(
     assert pending.stat().st_mode & 0o777 == 0o600
     assert pending_record["session_id"] == session
     assert pending_record["codex_home"] == str(root)
-    assert command("process", "--force", "--curation-json", str(fixture))[
-        "processed_events"
-    ] == 0
+    assert (
+        command("process", "--force", "--curation-json", str(fixture))[
+            "processed_events"
+        ]
+        == 0
+    )
     assert pending.exists()
 
     exact = root / "sessions" / f"rollout-test-{session}.jsonl"
@@ -97,6 +100,10 @@ def test_cli_capture_recovery_retry_and_policy(
     checkpoint = next(settings.checkpoint_dir.glob("*.json"))
     checkpoint_before = checkpoint.read_bytes()
     queueing.save_event(settings.state_dir / "health.json", {"score": 100})
+    queueing.save_event(
+        settings.state_dir / "maintenance-success.json",
+        {"completed_at": queueing.utc_now()},
+    )
     retried = command("daemon-once")
     assert retried["processing"]["groups_seen"] == 0
     assert retried["processing"]["reindex_result"] == "ok"
@@ -132,17 +139,26 @@ def test_cli_capture_recovery_retry_and_policy(
     config.write_text(json.dumps(existing))
     setup_args = (
         "setup",
-        "--vault", str(settings.vault_path),
-        "--state-dir", str(settings.state_dir),
-        "--codex-bin", sys.executable,
-        "--executable", sys.executable,
-        "--no-service", "--no-codex-hook", "--no-basic-memory",
-        "--disable-update-checks", "--apply",
+        "--vault",
+        str(settings.vault_path),
+        "--state-dir",
+        str(settings.state_dir),
+        "--codex-bin",
+        sys.executable,
+        "--executable",
+        sys.executable,
+        "--no-service",
+        "--no-codex-hook",
+        "--no-basic-memory",
+        "--disable-update-checks",
+        "--apply",
     )
     command(*setup_args)
     preserved = json.loads(config.read_text())
     policy_keys = (
-        "freshness_project_days", "freshness_decision_days", "freshness_runbook_days"
+        "freshness_project_days",
+        "freshness_decision_days",
+        "freshness_runbook_days",
     )
     assert [preserved[k] for k in policy_keys] == [60, 120, 21]
     command(*setup_args, "--freshness-project-days", "90")
@@ -169,8 +185,12 @@ def test_cli_capture_recovery_retry_and_policy(
             "recovered_audit": queueing.load_event(
                 next((settings.state_dir / "capture-recovered").glob("*.json"))
             ),
-            "index_status": queueing.load_event(settings.state_dir / "index-status.json"),
-            "worker_status": queueing.load_event(settings.state_dir / "worker-status.json"),
+            "index_status": queueing.load_event(
+                settings.state_dir / "index-status.json"
+            ),
+            "worker_status": queueing.load_event(
+                settings.state_dir / "worker-status.json"
+            ),
             "invalid_capture": json.loads(failed_capture.read_text()),
             "preserved_policy_days": [60, 120, 21],
             "explicit_policy_days": [90, 120, 21],
@@ -190,8 +210,14 @@ def test_daemon_backup_retry_is_immediate_and_restorable(
 
     configured = replace(settings, auto_git_backup=True)
     note = configured.vault_path / "manual-note.md"
-    note.write_text("# Backup recovery probe\n\nPreserve this synthetic operator note.\n")
+    note.write_text(
+        "# Backup recovery probe\n\nPreserve this synthetic operator note.\n"
+    )
     queueing.save_event(configured.state_dir / "health.json", {"score": 100})
+    queueing.save_event(
+        configured.state_dir / "maintenance-success.json",
+        {"completed_at": queueing.utc_now()},
+    )
     real_backup = worker.commit_git_backup
     calls = []
 
