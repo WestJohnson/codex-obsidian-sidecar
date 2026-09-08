@@ -122,16 +122,22 @@ live vault's `_System` directory.
 ### Deferred Report Publication
 
 Results are saved privately to `benchmark-results/latest.json` under the
-configured state directory before the vault report is published. A busy lease
-sets `report_publication.status` to `deferred` without losing the case results.
+configured state directory before the vault report is published. Saving results
+and publishing the report share a local process lock with `--publish-only`;
+overlapping runs return their own cases and exit status, and an older publication
+cannot overwrite a newly saved result. `latest.json` holds the most recently
+finalized run, so retain each command's JSON output as its acceptance evidence.
+A busy lease sets `report_publication.status` to `deferred` without losing the
+case results.
 After contention clears, retry only publication:
 
 ```sh
 obsidian-sidecar benchmark --publish-only
 ```
 
-This preserves the original `ran_at`, cases, score, and pass/fail result without
-rerunning cases or making new curation calls. The command exits according to
+This publishes the current saved result, preserving that run's `ran_at`, cases,
+score, and pass/fail result without rerunning cases or making new curation calls.
+The command exits according to
 the saved acceptance result; inspect `report_publication.status` separately to
 confirm publication. Retrying publication is not new acceptance evidence.
 

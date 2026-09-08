@@ -66,6 +66,19 @@ Retirement and failed-event reconciliation compute all cutoffs for a transcript
 in one bounded read snapshot. An incomplete final record leaves the affected
 captures pending, even if that record finishes during the scan.
 
+Before moving covered events to `processed/`, the worker saves a private
+`processing-completion.json` receipt containing only event filenames, their
+queue/failed directory, SHA-256 hashes, and receipt metadata. After an interrupted
+retirement, the next processing run verifies the exact source or processed copies,
+finishes pending moves, records the processing outcome, and removes the receipt.
+This recovery works with checkpoints disabled and does not repeat curation or
+rewrite notes. Missing, changed, or invalid completion evidence stops processing
+and leaves the receipt intact. Preserve the receipt and referenced event files;
+repair storage errors or restore verified matching copies before retrying
+`process --force`. Do not edit or move referenced events or delete the receipt to
+bypass recovery. The matching source distribution implements this in
+`src/obsidian_sidecar/worker.py::_recover_processing_completion`.
+
 ## Health And Alerts
 
 `worker-status.json` records the most recent timer result and the start of
@@ -95,6 +108,13 @@ operation results are recorded before releasing the process lock. Cloud
 maintenance does not use the local worker's silence threshold because it runs
 on a different schedule. Cloud-only deployments do not require a local-worker
 heartbeat.
+
+Passive reconnect results (`no-stage`, `stale-stage`, or `waiting-for-peer`)
+clear obsolete publication contention only when no nightly work remains due.
+They preserve real failures and any pending nightly obligation; they do not
+record maintenance success. Continuing writer contention remains actionable
+after 30 minutes. An unpublished stage still uses its separate age alert from
+[Operations](OPERATIONS.md#runtime-topology).
 
 ## Search Indexing
 
@@ -149,9 +169,11 @@ service reload fails, setup restores that state along with the file snapshots.
    Confirm actual Basic Memory retrieval locally, sync convergence, clean queues,
    and current backups, then observe more than one timer tick. Do not mistake
    an inactive successful oneshot for a disabled timer.
-5. To roll back, suspend the same schedules while idle, reinstall the saved
-   wheel, and restore only the backed-up config/service files changed by this upgrade.
+5. To roll back, suspend the same schedules while idle. Finish any
+   [interrupted retirement](#incomplete-captures) with the current runtime before
+   reinstalling the saved wheel; older workers cannot replay its completion
+   receipt. Restore only the backed-up config/service files changed by this upgrade.
    Retain capture recovery directories: older versions ignore them but they are
-   not disposable. Preserve current queues and checkpoints rather than replacing
-   them with a pre-upgrade snapshot. Resume the saved schedules and verify
-   service and retrieval again.
+   not disposable. Preserve current queues, processed-event evidence, and
+   checkpoints rather than replacing them with a pre-upgrade snapshot. Resume
+   the saved schedules and verify service and retrieval again.

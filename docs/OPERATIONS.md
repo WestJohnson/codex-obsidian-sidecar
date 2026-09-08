@@ -212,8 +212,10 @@ retained secrets. Before a retry, the
 worker checks whether a newer committed checkpoint cursor already covers that
 event's exact transcript boundary. Covered events move to `processed` with an
 auditable `superseded-by-checkpoint` disposition and are not curated again.
-For an uncovered event, inspect `last_error`, correct the underlying issue,
-move it back to `queue`, and run `process --force`.
+For an uncovered event, follow the
+[completion-receipt precautions](RUNTIME_RELIABILITY.md#incomplete-captures)
+before editing or moving it. Then inspect `last_error`, correct the underlying
+issue, move it back to `queue`, and run `process --force`.
 
 A corrupt checkpoint is ignored, recorded without content in
 `checkpoint-errors.jsonl`, and replaced only after the recovery curation is

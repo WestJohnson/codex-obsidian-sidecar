@@ -127,11 +127,8 @@ validated result only at
 lease, health note, cloud report, Git normalization file, or completed task in
 the vault.
 
-After the Mac reconnects, the next run compares every source-note hash and
-pending-task fingerprint with the staged packet. An exact match publishes the
-report without another model call. Any difference discards the stale stage and
-runs fresh analysis against the converged vault. This preserves useful
-overnight compute without allowing disconnected replicas to mutate independently.
+After the Mac reconnects, staged publication follows the fingerprint and
+maintenance-admission rules below.
 
 `obsidian-cloud-reconnect.timer` checks every five minutes with up to one minute
 of jitter. It exits immediately only when neither a stage nor deferred nightly
@@ -142,11 +139,17 @@ per ten minutes.
 Contention deferrals leave the stage intact and do not advance the publish
 attempt clock; a failed transaction still consumes the retry interval.
 Reconnect admission and retry-state writes share a process lock, so a competing
-probe cannot erase a newer failure's cooldown. A publication-only deferral does
-not make nightly analysis due; an already pending nightly obligation is preserved.
+probe cannot erase a newer failure's cooldown. Admission is recorded before
+backups or analysis, including offline work, so a process exit retains the
+retry interval. A publication-only deferral does not make nightly analysis due;
+an already pending nightly obligation is preserved.
+The transaction rechecks that obligation under the maintenance lock. If another
+run already completed it, the retry proceeds only as staged publication.
 For staged publication alone, it invokes the full fenced transaction only after
-Syncthing is healthy and the source/task fingerprints still match. A stale stage
-waits for nightly maintenance to discard and recompute it. When nightly work was
+Syncthing is healthy and the source/task fingerprints still match, and checks
+those fingerprints again inside the transaction. A matching stage publishes
+without another model call. A stale stage waits for nightly maintenance to
+discard and recompute it. When nightly work was
 deferred, the reconnect timer retries that work even without a stage, retaining
 the normal analysis bounds and failure cooldown.
 
