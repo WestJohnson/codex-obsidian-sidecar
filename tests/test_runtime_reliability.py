@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -445,7 +446,9 @@ def test_recovered_capture_uses_latest_evidence_cutoff(
             packets.append(packet)
             return valid_curation
 
-    monkeypatch.setattr("obsidian_sidecar.worker.reindex_basic_memory", lambda _: "ok")
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
     result = process_ready(settings, force=True, curator=RecordingCurator())
     assert result.failed == 0
     assert result.processed_events == 2
@@ -472,7 +475,9 @@ def test_invalid_cutoff_is_preserved_as_failed_event(
     enqueue_event(settings, event)
     invalid = settings.queue_dir / "invalid-cutoff.json"
     save_event(invalid, {**event, "captured_at": cutoff})
-    monkeypatch.setattr("obsidian_sidecar.worker.reindex_basic_memory", lambda _: "ok")
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
     result = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
     assert result.processed_events == 1
     assert result.failed == 1
@@ -536,7 +541,9 @@ def test_only_events_covered_by_written_cursor_are_retired(
         return packet
 
     monkeypatch.setattr(worker, "build_curation_packet", partial_packet)
-    monkeypatch.setattr(worker, "reindex_basic_memory", lambda _: "ok")
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
     result = process_ready(
         configured, force=True, curator=StaticCurator(valid_curation)
     )
@@ -618,7 +625,9 @@ def test_manual_backup_blocks_worker_after_lease_expiry(
         return "ok"
 
     monkeypatch.setattr(worker, "commit_git_backup", long_backup)
-    monkeypatch.setattr(worker, "reindex_basic_memory", lambda _: "ok")
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
     assert run_maintenance(configured)["backup_result"] == "ok"
     assert (
         process_ready(
@@ -757,14 +766,229 @@ def test_incomplete_tail_cannot_retire_capture(settings, transcript_path):
     assert not event.exists()
 
 
+@pytest.mark.parametrize(
+    ("mode", "checkpoint_enabled"),
+    [("baseline", True), ("recovery", True), ("baseline", False)],
+)
+def test_completed_tail_between_reads_is_never_retired_unseen(
+    settings, transcript_path, valid_curation, monkeypatch, mode, checkpoint_enabled
+):
+    from obsidian_sidecar import worker
+    from obsidian_sidecar.checkpoints import checkpoint_path, load_checkpoint
+
+    settings = replace(settings, checkpoint_enabled=checkpoint_enabled)
+    session = "fixture-session-001"
+    content = transcript_path.read_bytes()
+    tail_text = "Completed the split transcript record."
+    tail = (
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-07-14T08:02:00Z",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": tail_text}],
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+    transcript_path.write_bytes(content + tail[:25])
+    event = enqueue_event(
+        settings,
+        {
+            "session_id": session,
+            "cwd": str(transcript_path.parent),
+            "transcript_path": str(transcript_path),
+            "captured_at": "2026-07-14T08:03:00Z",
+        },
+    )
+    if mode == "recovery":
+        save_event(
+            checkpoint_path(settings, session),
+            {
+                "version": 1,
+                "session_id": session,
+                "curation": valid_curation,
+                "captured_at": "2026-07-14T08:01:00Z",
+                "update_count": 1,
+                "cursor": {
+                    "transcript_path": str(transcript_path),
+                    "byte_offset": len(content) + len(tail) + 1000,
+                },
+            },
+        )
+    original_open = Path.open
+    completed = False
+
+    @contextmanager
+    def complete_after_read(path, mode, *args, **kwargs):
+        nonlocal completed
+        with original_open(path, mode, *args, **kwargs) as handle:
+            yield handle
+        if not completed:
+            completed = True
+            with original_open(path, "ab") as handle:
+                handle.write(tail[25:])
+
+    def open_with_completion(path, mode="r", *args, **kwargs):
+        if path == transcript_path and mode in {"r", "rb"} and not completed:
+            return complete_after_read(path, mode, *args, **kwargs)
+        return original_open(path, mode, *args, **kwargs)
+
+    packets = []
+
+    class RecordingCurator:
+        def curate(self, packet):
+            packets.append(packet)
+            if len(packets) == 1:
+                return valid_curation
+            return {
+                **valid_curation,
+                "skip": True,
+                **{
+                    key: []
+                    for key in (
+                        "decisions",
+                        "changes",
+                        "verification",
+                        "unresolved",
+                        "next_actions",
+                    )
+                },
+            }
+
+    monkeypatch.setattr(Path, "open", open_with_completion)
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
+    curator = RecordingCurator()
+    first = worker.process_ready(settings, force=True, curator=curator)
+    assert completed
+    assert first.failed == 0
+    assert first.processed_events == 0
+    assert first.checkpoint_chunks_pending == 1
+    assert load_event(event)["attempts"] == 0
+    assert packets[0]["checkpoint"]["mode"] == mode
+    assert packets[0]["checkpoint"]["has_more"] is True
+    assert packets[0]["checkpoint"]["cursor"]["byte_offset"] == len(content)
+    assert tail_text not in [item["text"] for item in packets[0]["evidence"]]
+    if checkpoint_enabled:
+        assert load_checkpoint(settings, session)["cursor"]["byte_offset"] == len(
+            content
+        )
+
+    second = worker.process_ready(settings, force=True, curator=curator)
+    assert second.failed == 0
+    assert second.processed_events == 1
+    assert not event.exists()
+    assert tail_text in [item["text"] for item in packets[1]["evidence"]]
+    assert packets[1]["checkpoint"]["cursor"]["byte_offset"] == len(content + tail)
+
+
+@pytest.mark.parametrize(
+    ("prior_status", "prior_full", "expected_full"),
+    [("ok", False, False), ("error", True, True), ("pending", True, True)],
+)
+def test_idle_tick_recovers_indexing_after_queue_retirement_crash(
+    settings,
+    transcript_path,
+    valid_curation,
+    monkeypatch,
+    prior_status,
+    prior_full,
+    expected_full,
+):
+    from obsidian_sidecar import maintenance, worker
+    from obsidian_sidecar.checkpoints import load_checkpoint
+
+    state = settings.state_dir / "index-status.json"
+    save_event(state, {"status": prior_status, "full": prior_full})
+    save_event(settings.state_dir / "health.json", {"score": 100})
+    save_event(
+        settings.state_dir / "maintenance-success.json",
+        {
+            "completed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    event = enqueue_event(
+        settings,
+        {
+            "session_id": "fixture-session-001",
+            "cwd": str(transcript_path.parent),
+            "transcript_path": str(transcript_path),
+            "captured_at": "2026-07-14T08:01:00Z",
+        },
+    )
+    curations = []
+    notes = []
+    index_calls = []
+    write = worker.write_curation
+    retire = worker._retire_covered_events
+
+    class RecordingCurator:
+        def curate(self, packet):
+            curations.append(packet)
+            return valid_curation
+
+    def write_after_pending(*args, **kwargs):
+        pending = load_event(state)
+        assert pending["status"] == "pending"
+        assert pending["full"] is expected_full
+        result = write(*args, **kwargs)
+        notes.append(result.note_path)
+        return result
+
+    def terminate_after_retirement(*args, **kwargs):
+        assert retire(*args, **kwargs) == 1
+        raise SystemExit("simulated worker termination")
+
+    def index(_settings, *, full=False):
+        index_calls.append(full)
+        assert load_event(state)["status"] == "running"
+        return "ok"
+
+    monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: RecordingCurator())
+    monkeypatch.setattr(worker, "write_curation", write_after_pending)
+    monkeypatch.setattr(worker, "_retire_covered_events", terminate_after_retirement)
+    monkeypatch.setattr(maintenance, "_reindex_basic_memory", index)
+    monkeypatch.setattr(maintenance, "basic_memory_status", lambda _: "ok")
+    monkeypatch.setattr(maintenance, "_command_status", lambda *_: "ok")
+    with pytest.raises(SystemExit, match="simulated worker termination"):
+        daemon_once(settings)
+
+    assert not event.exists()
+    assert not list(settings.queue_dir.glob("*.json"))
+    assert len(list(settings.processed_dir.glob("*.json"))) == 1
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert checkpoint["update_count"] == 1
+    note_before = notes[0].read_bytes()
+    assert load_event(state)["status"] == "pending"
+    assert index_calls == []
+
+    result = daemon_once(settings)
+    assert result["processing"]["groups_seen"] == 0
+    assert result["processing"]["reindex_result"] == "ok"
+    assert result["maintenance"] is None
+    assert index_calls == [expected_full]
+    assert len(curations) == 1
+    assert load_checkpoint(settings, "fixture-session-001") == checkpoint
+    assert notes[0].read_bytes() == note_before
+    assert load_event(state)["status"] == "ok"
+    assert load_event(settings.state_dir / "worker-status.json")["status"] == "ok"
+
+
 def test_transcript_only_capture_uses_canonical_checkpoint(
     settings, transcript_path, valid_curation, monkeypatch
 ):
-    from obsidian_sidecar import worker
     from obsidian_sidecar.checkpoints import load_checkpoint
     from obsidian_sidecar.transcript import build_curation_packet
 
-    monkeypatch.setattr(worker, "reindex_basic_memory", lambda _: "ok")
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
+    )
     event = {
         "transcript_path": str(transcript_path),
         "captured_at": "2026-07-14T08:01:00Z",

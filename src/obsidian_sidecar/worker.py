@@ -20,6 +20,7 @@ from .maintenance import (
     commit_git_backup,
     indexing_problem,
     inspect_vault,
+    mark_index_pending,
     reindex_basic_memory,
     write_health_report,
 )
@@ -334,6 +335,7 @@ def _process_ready(
                         minimum_confidence=settings.minimum_confidence,
                     )
                     if not validation.valid:
+                        mark_index_pending(settings)
                         write_quarantine(
                             settings,
                             session_id=str(packet.get("session_id") or "unknown"),
@@ -365,6 +367,7 @@ def _process_ready(
                             paths, settings, packet
                         )
                         continue
+                    mark_index_pending(settings)
                     result = write_curation(
                         settings,
                         curation,

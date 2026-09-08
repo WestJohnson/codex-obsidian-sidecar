@@ -226,6 +226,22 @@ def indexing_problem(settings: Settings) -> str | None:
     return "basic-memory-index-error"
 
 
+def mark_index_pending(settings: Settings) -> None:
+    path = settings.state_dir / "index-status.json"
+    try:
+        previous = load_event(path)
+    except (OSError, ValueError):
+        previous = {}
+    save_event(
+        path,
+        {
+            "checked_at": utc_now(),
+            "status": "pending",
+            "full": previous.get("status") != "ok" and previous.get("full") is True,
+        },
+    )
+
+
 def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
     path = settings.state_dir / "index-status.json"
     try:

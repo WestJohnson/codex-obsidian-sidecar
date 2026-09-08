@@ -25,7 +25,7 @@ def test_worker_processes_end_to_end(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     enqueue_event(
         settings,
@@ -57,7 +57,7 @@ def test_worker_normalizes_safe_topic_metadata_before_validation(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     curation = deepcopy(valid_curation)
     curation["topics"] = [f"topic-{index}" for index in range(14)]
@@ -89,7 +89,7 @@ def test_worker_self_compacts_saturated_checkpoint_output(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     base_event = {
         "session_id": "fixture-session-001",
@@ -188,7 +188,7 @@ def test_worker_reconciles_only_failed_events_covered_by_a_committed_cursor(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     event = {
         "session_id": "fixture-session-001",
@@ -260,7 +260,7 @@ def test_worker_uses_saved_checkpoint_for_the_next_turn(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     first_event = {
         "session_id": "fixture-session-001",
@@ -356,7 +356,7 @@ def test_failed_vault_write_does_not_advance_checkpoint(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     event = {
         "session_id": "fixture-session-001",

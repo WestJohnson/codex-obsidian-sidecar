@@ -506,6 +506,17 @@ def _basic_memory_registration(project: str, vault: Path) -> dict[str, Any]:
     return {"status": "created", "project": project, "path": str(vault.absolute())}
 
 
+def _launchd_disabled(options: SetupOptions) -> bool:
+    result = _run(["launchctl", "print-disabled", f"gui/{os.getuid()}"], timeout=20)
+    if result.returncode != 0:
+        raise RuntimeError("Could not read launchd disabled state")
+    block = re.search(r"disabled services\s*=\s*\{(.*?)\}", result.stdout, re.DOTALL)
+    if block is None:
+        raise RuntimeError("Could not parse launchd disabled state")
+    states = dict(re.findall(r'"([^"]+)"\s*=>\s*(true|false)', block.group(1)))
+    return states.get(options.service_label) == "true"
+
+
 def _reload_service(options: SetupOptions) -> dict[str, Any]:
     if sys.platform == "darwin":
         target = f"gui/{os.getuid()}"
@@ -557,6 +568,11 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
     if options.install_codex_hook:
         touched.append(hooks)
     touched.extend(service_paths)
+    launchd_disabled = (
+        _launchd_disabled(options)
+        if options.install_service and sys.platform == "darwin"
+        else None
+    )
     snapshots = {path: _snapshot(path) for path in touched}
     backups: list[str] = []
     for path, (content, mode) in snapshots.items():
@@ -567,6 +583,7 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
         backups.append(str(backup))
     basic_memory: dict[str, Any] | None = None
     service: dict[str, Any] | None = None
+    service_reload_started = False
     try:
         options.state_dir.expanduser().mkdir(parents=True, exist_ok=True, mode=0o700)
         _write_bytes(config, _config_bytes(options), 0o600)
@@ -586,13 +603,27 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
                 options.vault_path.expanduser().absolute(),
             )
         if options.install_service:
+            service_reload_started = True
             service = _reload_service(options)
     except Exception:
-        for path, (content, mode) in snapshots.items():
-            if content is None:
-                path.unlink(missing_ok=True)
-            else:
-                _write_bytes(path, content, mode)
+        try:
+            for path, (content, mode) in snapshots.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_bytes(path, content, mode)
+        finally:
+            if service_reload_started and launchd_disabled is not None:
+                restored = _run(
+                    [
+                        "launchctl",
+                        "disable" if launchd_disabled else "enable",
+                        f"gui/{os.getuid()}/{options.service_label}",
+                    ],
+                    timeout=20,
+                )
+                if restored.returncode != 0:
+                    raise RuntimeError("Could not restore launchd disabled state")
         raise
     verification = verify_setup(load_settings(config), config_path=config)
     return {

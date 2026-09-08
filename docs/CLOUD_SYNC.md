@@ -134,14 +134,18 @@ runs fresh analysis against the converged vault. This preserves useful
 overnight compute without allowing disconnected replicas to mutate independently.
 
 `obsidian-cloud-reconnect.timer` checks every five minutes with up to one minute
-of jitter. It exits immediately when no stage exists, waits without error while
-the peer is offline, and rate-limits publish attempts to one per ten minutes.
+of jitter. It exits immediately only when neither a stage nor deferred nightly
+maintenance is due. Staged publication waits without error while the peer is
+offline; deferred nightly work can retry against a complete offline replica
+under the same staging rules. Real transaction attempts remain limited to one
+per ten minutes.
 Contention deferrals leave the stage intact and do not advance the publish
 attempt clock; a failed transaction still consumes the retry interval.
-It invokes the full fenced transaction only after Syncthing is healthy and the
-source/task fingerprints still match. A stale stage is left for the nightly
-transaction to discard and recompute rather than spending from a reconnect
-probe.
+For staged publication alone, it invokes the full fenced transaction only after
+Syncthing is healthy and the source/task fingerprints still match. A stale stage
+waits for nightly maintenance to discard and recompute it. When nightly work was
+deferred, the reconnect timer retries that work even without a stage, retaining
+the normal analysis bounds and failure cooldown.
 
 ## Queuing An Overnight Task
 

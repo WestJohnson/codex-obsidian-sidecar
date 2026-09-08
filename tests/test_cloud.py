@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import tarfile
 from dataclasses import replace
@@ -871,47 +872,146 @@ def test_cloud_benchmark_rejects_partial_future_backup(
     assert "restorable-backup" in result["failed_critical"]
 
 
-def test_cloud_service_has_bounded_failure_retries() -> None:
+def _systemd_unit(text: str) -> dict[tuple[str, str], list[str]]:
+    directives: dict[tuple[str, str], list[str]] = {}
+    section = ""
+    continued = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        line = continued + line
+        if line.endswith("\\"):
+            continued = line[:-1] + " "
+            continue
+        continued = ""
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            continue
+        key, separator, value = line.partition("=")
+        if not section or not separator:
+            raise ValueError("Invalid systemd directive")
+        values = directives.setdefault((section, key.strip()), [])
+        if value.strip():
+            values.append(value.strip())
+        else:
+            values.clear()
+    if continued:
+        raise ValueError("Incomplete systemd continuation")
+    return directives
+
+
+def _cloud_retry_units() -> dict[str, str]:
     deploy = Path(__file__).parents[1] / "deploy/systemd-cloud"
-    unit = (deploy / "obsidian-cloud-maintenance.service").read_text(encoding="utf-8")
-    failure_unit = (deploy / "obsidian-cloud-maintenance-failure.service").read_text(
-        encoding="utf-8"
+    names = [
+        f"obsidian-cloud-{job}{suffix}.service"
+        for job in ("maintenance", "reconnect")
+        for suffix in ("", "-failure", "-success")
+    ] + ["obsidian-cloud-reconnect.timer"]
+    return {name: (deploy / name).read_text(encoding="utf-8") for name in names}
+
+
+def _assert_cloud_retry_contract(sources: dict[str, str]) -> None:
+    units = {name: _systemd_unit(text) for name, text in sources.items()}
+    maintenance = units["obsidian-cloud-maintenance.service"]
+    assert int(maintenance.get(("Unit", "StartLimitBurst"), ["0"])[-1]) == 3
+    assert maintenance.get(("Unit", "StartLimitIntervalSec")) == ["1h"]
+    assert maintenance.get(("Service", "Restart")) == ["on-failure"]
+    assert maintenance.get(("Service", "RestartSec")) == ["15min"]
+    for job in ("maintenance", "reconnect"):
+        service = f"obsidian-cloud-{job}"
+        unit = units[f"{service}.service"]
+        marker = f"/var/lib/obsidian-cloud/{job}.failed"
+        assert unit.get(("Service", "Type")) == ["oneshot"]
+        assert unit.get(("Unit", "OnFailure")) == [f"{service}-failure.service"]
+        assert unit.get(("Unit", "OnSuccess")) == [f"{service}-success.service"]
+        assert all(
+            marker not in shlex.split(command)
+            for command in unit.get(("Service", "ExecStartPre"), [])
+        )
+        failure = units[f"{service}-failure.service"]
+        success = units[f"{service}-success.service"]
+        assert failure.get(("Service", "Type")) == ["oneshot"]
+        assert success.get(("Service", "Type")) == ["oneshot"]
+        assert [
+            shlex.split(command)
+            for command in failure.get(("Service", "ExecStart"), [])
+        ] == [
+            ["/usr/bin/touch", marker],
+        ]
+        assert [
+            shlex.split(command)
+            for command in success.get(("Service", "ExecStart"), [])
+        ] == [
+            ["/usr/bin/rm", "-f", marker],
+            ["/usr/bin/systemctl", "reset-failed", f"{service}.service"],
+        ]
+    timer = units["obsidian-cloud-reconnect.timer"]
+    assert timer.get(("Timer", "OnUnitActiveSec")) == ["5min"]
+    assert timer.get(("Timer", "Unit")) == ["obsidian-cloud-reconnect.service"]
+
+
+def test_cloud_service_has_bounded_failure_retries() -> None:
+    _assert_cloud_retry_contract(_cloud_retry_units())
+
+
+@pytest.mark.parametrize("mutation", ["commented", "misplaced"])
+@pytest.mark.parametrize(
+    ("filename", "directive"),
+    [
+        ("obsidian-cloud-maintenance.service", "StartLimitBurst"),
+        ("obsidian-cloud-maintenance.service", "Restart"),
+        ("obsidian-cloud-maintenance.service", "RestartSec"),
+        ("obsidian-cloud-maintenance.service", "OnFailure"),
+        ("obsidian-cloud-maintenance.service", "OnSuccess"),
+        ("obsidian-cloud-maintenance-failure.service", "ExecStart"),
+        ("obsidian-cloud-maintenance-success.service", "ExecStart"),
+        ("obsidian-cloud-reconnect.service", "OnFailure"),
+        ("obsidian-cloud-reconnect.service", "OnSuccess"),
+        ("obsidian-cloud-reconnect-failure.service", "ExecStart"),
+        ("obsidian-cloud-reconnect-success.service", "ExecStart"),
+        ("obsidian-cloud-reconnect.timer", "OnUnitActiveSec"),
+        ("obsidian-cloud-reconnect.timer", "Unit"),
+    ],
+)
+def test_cloud_retry_contract_rejects_inactive_directives(
+    filename: str, directive: str, mutation: str
+) -> None:
+    sources = _cloud_retry_units()
+    retained = []
+    removed = []
+    for line in sources[filename].splitlines():
+        if line.partition("=")[0].strip() == directive:
+            removed.append(line)
+        else:
+            retained.append(line)
+    assert removed
+    if mutation == "commented":
+        retained.extend("# " + line for line in removed)
+    else:
+        retained.extend(["[WrongSection]", *removed])
+    sources[filename] = "\n".join(retained)
+    with pytest.raises(AssertionError):
+        _assert_cloud_retry_contract(sources)
+
+
+def test_systemd_unit_normalizes_comments_continuations_and_command_resets() -> None:
+    unit = _systemd_unit(
+        "[Service]\n"
+        "# ExecStart=/usr/bin/false\n"
+        "; ExecStart=/bin/false\n"
+        "ExecStart=/usr/bin/false\n"
+        "ExecStart=\n"
+        "ExecStart=/usr/bin/echo \\\n"
+        "  ready\n"
+        "ExecStart=/usr/bin/true\n"
+        "[Unit]\nRestart=always\n"
     )
-    success_unit = (deploy / "obsidian-cloud-maintenance-success.service").read_text(
-        encoding="utf-8"
-    )
-    assert "StartLimitBurst=3" in unit
-    assert "Restart=on-failure" in unit
-    assert "RestartSec=15min" in unit
-    assert "OnFailure=obsidian-cloud-maintenance-failure.service" in unit
-    assert "OnSuccess=obsidian-cloud-maintenance-success.service" in unit
-    assert "ExecStartPre=/usr/bin/rm" not in unit
-    assert "/var/lib/obsidian-cloud/maintenance.failed" in failure_unit
-    assert "/usr/bin/rm -f /var/lib/obsidian-cloud/maintenance.failed" in success_unit
-    assert "systemctl reset-failed obsidian-cloud-maintenance.service" in success_unit
-    reconnect_unit = (deploy / "obsidian-cloud-reconnect.service").read_text(
-        encoding="utf-8"
-    )
-    reconnect_failure_unit = (
-        deploy / "obsidian-cloud-reconnect-failure.service"
-    ).read_text(encoding="utf-8")
-    reconnect_success_unit = (
-        deploy / "obsidian-cloud-reconnect-success.service"
-    ).read_text(encoding="utf-8")
-    assert "OnFailure=obsidian-cloud-reconnect-failure.service" in reconnect_unit
-    assert "OnSuccess=obsidian-cloud-reconnect-success.service" in reconnect_unit
-    assert "/var/lib/obsidian-cloud/reconnect.failed" in reconnect_failure_unit
-    assert "/usr/bin/rm -f /var/lib/obsidian-cloud/reconnect.failed" in (
-        reconnect_success_unit
-    )
-    assert "systemctl reset-failed obsidian-cloud-reconnect.service" in (
-        reconnect_success_unit
-    )
-    reconnect_timer = (deploy / "obsidian-cloud-reconnect.timer").read_text(
-        encoding="utf-8"
-    )
-    assert "OnUnitActiveSec=5min" in reconnect_timer
-    assert "Unit=obsidian-cloud-reconnect.service" in reconnect_timer
+    assert [shlex.split(command) for command in unit[("Service", "ExecStart")]] == [
+        ["/usr/bin/echo", "ready"],
+        ["/usr/bin/true"],
+    ]
+    assert ("Service", "Restart") not in unit
 
 
 def test_cloud_benchmark_surfaces_previous_service_failure(

@@ -49,9 +49,13 @@ substitute the newest transcript or mark a queued recovery as completed
 curation. Normal retry handling is in [Operations](OPERATIONS.md#recovery).
 
 Capture retirement requires a complete transcript cutoff covered by a validated
-checkpoint. An unfinished JSONL tail remains queued until the complete record
-is covered. Transcript-only hooks resolve their canonical session header before
-checkpoint selection and retirement, avoiding repeated baseline curation.
+checkpoint. Baseline and recovery packets derive evidence, cursor, and incomplete
+tail status from the same read, retaining the existing last-16-message and
+character limits. An unfinished JSONL tail remains queued until the complete
+record is covered, including when it finishes while a packet is being built.
+Transcript-only hooks resolve their canonical session header and missing working
+directory before checkpoint selection and retirement. Incremental packets retain
+that Git and artifact base while preserving explicit hook routing values.
 
 ## Health And Alerts
 
@@ -81,8 +85,10 @@ Read-only inspection labels that API `observation-only`; local `doctor` runs
 actual indexing, and the [live benchmark](TESTING.md#live-suite) independently
 verifies retrieval under the platform's integration requirements.
 
-`index-status.json` retains indexing state without exception messages. Failed
-indexing remains actionable even after the note and checkpoint were committed.
+`index-status.json` records pending indexing before capture writes to the vault,
+without exception messages. Pending or failed indexing remains actionable even
+if the worker exits after the note, checkpoint, and queue retirement are committed.
+Only confirmed indexing success clears that obligation.
 The local worker retries indexing on an idle tick under its writer lease,
 without repeating curation or advancing the checkpoint. A failed full search
 rebuild retains full mode for its retry. `process` exits nonzero when indexing
@@ -97,6 +103,8 @@ so interrupted jobs remain eligible for recovery.
 Verify candidates before promotion. Public releases follow the signed-tag,
 CI-provenance, immutable-artifact, and update-index procedure in
 [Updates](UPDATES.md#maintainer-flow); installation alone does not publish them.
+macOS setup reads the prior launchd disabled state before changing files. If
+service reload fails, setup restores that state along with the file snapshots.
 
 1. Capture package version, config, hooks, service state, queue counts, and vault
    backup. Suspend only Sidecar scheduling and wait for active work to finish:
