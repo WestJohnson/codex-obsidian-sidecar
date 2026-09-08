@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections import deque
 from dataclasses import dataclass
@@ -254,6 +255,42 @@ def _cursor_at_cutoff(
                 continue
             if _past_cutoff(event.get("timestamp"), cutoff):
                 return line_start
+
+
+def cutoff_boundaries(
+    transcript_path: Path, cutoffs: Iterable[str]
+) -> dict[str, int | None]:
+    pending = sorted(
+        (datetime.fromisoformat(value.replace("Z", "+00:00")), value)
+        for value in set(cutoffs)
+    )
+    boundaries: dict[str, int | None] = {value: None for _, value in pending}
+    index = 0
+    with transcript_path.open("rb") as handle:
+        limit = os.fstat(handle.fileno()).st_size
+        while index < len(pending):
+            start = handle.tell()
+            line = handle.readline(limit - start)
+            if not line:
+                for _, cutoff in pending[index:]:
+                    boundaries[cutoff] = start
+                break
+            try:
+                event = json.loads(line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                if not line.endswith(b"\n"):
+                    break
+                continue
+            try:
+                timestamp = datetime.fromisoformat(
+                    event["timestamp"].replace("Z", "+00:00")
+                )
+                while index < len(pending) and timestamp > pending[index][0]:
+                    boundaries[pending[index][1]] = start
+                    index += 1
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+    return boundaries
 
 
 def extract_message_delta(

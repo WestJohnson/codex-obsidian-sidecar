@@ -4,9 +4,11 @@ import json
 import shlex
 import subprocess
 import tarfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Event, local
 
 import pytest
 
@@ -252,6 +254,158 @@ def test_progressing_replication_with_writer_is_deferred(settings, tmp_path, sta
     assert result["status"] == "deferred"
     assert agent.calls == 0
     assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+
+
+def test_concurrent_cloud_deferral_cannot_erase_a_newer_failure(
+    settings, tmp_path, monkeypatch
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.alerts import alert_status
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(
+        status_path, {"status": "ok", "checked_at": datetime.now(UTC).isoformat()}
+    )
+    active_started = Event()
+    fail_active = Event()
+    observer_read = Event()
+    release_observer = Event()
+    role = local()
+    original_load = cloud.load_event
+
+    def pending_failure(*_args, **_kwargs):
+        active_started.set()
+        assert fail_active.wait(5)
+        raise RuntimeError("private cloud failure")
+
+    def delayed_observer_read(path):
+        value = original_load(path)
+        if (
+            path == status_path
+            and getattr(role, "observer", False)
+            and not observer_read.is_set()
+        ):
+            observer_read.set()
+            assert release_observer.wait(5)
+        return value
+
+    def observe():
+        role.observer = True
+        return run_cloud_maintenance(configured, client=FakeSync())
+
+    monkeypatch.setattr(cloud, "_run_cloud_maintenance", pending_failure)
+    monkeypatch.setattr(cloud, "load_event", delayed_observer_read)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        active = pool.submit(run_cloud_maintenance, configured, client=FakeSync())
+        try:
+            assert active_started.wait(5)
+            observer = pool.submit(observe)
+            assert observer_read.wait(5)
+            fail_active.set()
+            with pytest.raises(FutureTimeout):
+                active.result(timeout=0.1)
+        finally:
+            fail_active.set()
+            release_observer.set()
+        assert observer.result(timeout=5)["status"] == "deferred"
+        with pytest.raises(RuntimeError, match="private cloud failure"):
+            active.result(timeout=5)
+    state = load_event(status_path)
+    assert state["failure"] == "RuntimeError"
+    assert state["maintenance_due"] is True
+    assert "private cloud failure" not in status_path.read_text()
+    with MachineProcessLock(configured.lock_dir / "cloud-maintenance.lock"):
+        assert (
+            run_cloud_maintenance(configured, client=FakeSync())["status"] == "deferred"
+        )
+    assert load_event(status_path)["failure"] == "RuntimeError"
+    assert not alert_status(configured)["healthy"]
+
+    monkeypatch.setattr(
+        cloud, "_run_cloud_maintenance", lambda *a, **k: {"status": "ok"}
+    )
+    assert run_cloud_maintenance(configured, client=FakeSync())["status"] == "ok"
+    assert not load_event(status_path).get("failure")
+    assert alert_status(configured)["healthy"]
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "syncing",
+        "scanning",
+        "sync-errors",
+        "invalid-remote",
+        "conflict",
+        "no-writer",
+    ],
+)
+def test_final_convergence_classifies_contention_before_failure_retries(
+    settings, tmp_path, condition, monkeypatch
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    writer = configured.vault_path / "_System/Coordination/local-writer.json"
+    conflict = configured.vault_path / "note.sync-conflict-fixture.md"
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    deferred = condition in {"syncing", "scanning"}
+
+    class RacingSync(FakeSync):
+        def wait_healthy(self, timeout_seconds):
+            super().wait_healthy(timeout_seconds)
+            if condition != "no-writer":
+                save_event(writer, {"expires_at": "2099-01-01T00:00:00+00:00"})
+            if condition == "conflict":
+                conflict.write_text("fixture conflict", encoding="utf-8")
+            return SyncSnapshot(
+                "scanning" if condition == "scanning" else "syncing",
+                1 if condition == "sync-errors" else 0,
+                2,
+                100,
+                90,
+                "invalid" if condition == "invalid-remote" else "valid",
+                True,
+            )
+
+    client = RacingSync()
+    if deferred:
+        assert (
+            run_cloud_maintenance(configured, client=client, agent=agent)["status"]
+            == "deferred"
+        )
+    else:
+        with pytest.raises(RuntimeError):
+            run_cloud_maintenance(configured, client=client, agent=agent)
+    state_path = configured.state_dir / "cloud-maintenance-status.json"
+    state = load_event(state_path)
+    assert state["maintenance_due"] is deferred
+    assert bool(state.get("failure")) is (not deferred)
+    assert agent.calls == 0
+    assert client.waits == 1
+    assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+    writer.unlink(missing_ok=True)
+    conflict.unlink(missing_ok=True)
+    if not deferred:
+        save_event(state_path, {**state, "maintenance_due": True})
+
+    if deferred:
+        assert run_cloud_reconcile(configured, client=client)["status"] == "deferred"
+    else:
+        with pytest.raises(RuntimeError):
+            run_cloud_reconcile(configured, client=client)
+    reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert bool(reconnect.get("last_attempt_at")) is (not deferred)
+    assert client.waits == 2
+    assert agent.calls == 0
+    assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+    assert not (
+        configured.vault_path / "_System/Coordination/cloud-maintenance.json"
+    ).exists()
 
 
 @pytest.mark.parametrize("connected", [True, False])

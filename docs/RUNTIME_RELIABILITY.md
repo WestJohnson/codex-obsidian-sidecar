@@ -59,14 +59,20 @@ session ID also recover a missing working directory from the validated header.
 Canonical identity is resolved before grouping and debounce; each capture keeps
 its original cutoff. Incremental packets retain that Git and artifact base while
 preserving explicit hook routing values.
+Retirement and failed-event reconciliation compute all cutoffs for a transcript
+in one bounded read snapshot. An incomplete final record leaves the affected
+captures pending, even if that record finishes during the scan.
 
 ## Health And Alerts
 
 `worker-status.json` records the most recent timer result and the start of
 continuous deferral, without transcript content or exception messages. Errors,
-30-minute silence, and 30-minute continuous deferral are actionable. Repeated
-alerts use the existing cooldown. Stalled or failed captures, runtime problems,
-and indexing failures cap doctor health at 79; use fresh `alert-status` alongside
+30-minute silence, and 30-minute continuous deferral are actionable. Timer
+ticks retain unresolved operation failures while running or deferred. A backup
+failure clears only after a successful backup; unrelated successful work does
+not clear it. Repeated alerts use the existing cooldown. Stalled or failed
+captures, runtime problems, and indexing failures cap doctor health at 79;
+use fresh `alert-status` alongside
 the periodic health report. A closed laptop will legitimately report a stale
 local worker until its next successful tick. A missing status file is not itself
 reported as stale; confirm the service has run using the
@@ -74,8 +80,10 @@ reported as stale; confirm the service has run using the
 
 `cloud-maintenance-status.json` records cloud errors and continuous contention.
 A prior cloud failure remains visible through subsequent deferrals until a
-successful connected or offline-staged run clears it. Cloud maintenance does
-not use the local worker's silence threshold because it runs on a different
+successful connected or offline-staged run clears it. A concurrent contention
+observer cannot overwrite a newer failure: status updates are serialized, and
+operation results are recorded before releasing the process lock. Cloud
+maintenance does not use the local worker's silence threshold because it runs on a different
 schedule. Cloud-only deployments do not require a local-worker heartbeat.
 
 ## Search Indexing

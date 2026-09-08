@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .checkpoints import (
     load_checkpoint,
@@ -35,7 +35,12 @@ from .queueing import (
     utc_now,
 )
 from .security import redact_text
-from .transcript import _cursor_at_cutoff, build_curation_packet, resolve_session_event
+from .transcript import (
+    _cursor_at_cutoff,
+    build_curation_packet,
+    cutoff_boundaries,
+    resolve_session_event,
+)
 from .validation import normalize_curation_metadata, validate_curation
 from .vault import write_curation, write_quarantine
 from .vault import _atomic_write
@@ -118,7 +123,9 @@ def _record_failure(paths: list[Path], settings: Settings, error: Exception) -> 
 
 
 def _checkpoint_coverage(
-    settings: Settings, event: dict[str, Any]
+    settings: Settings,
+    event: dict[str, Any],
+    boundaries: dict[tuple[Path, str], int | None] | None = None,
 ) -> dict[str, int] | None:
     try:
         event = resolve_session_event(event)
@@ -140,11 +147,13 @@ def _checkpoint_coverage(
     checkpoint = load_checkpoint(settings, session_id)
     if checkpoint is None:
         return None
-    return _cursor_coverage(event, checkpoint)
+    return _cursor_coverage(event, checkpoint, boundaries)
 
 
 def _cursor_coverage(
-    event: dict[str, Any], checkpoint: dict[str, Any]
+    event: dict[str, Any],
+    checkpoint: dict[str, Any],
+    boundaries: dict[tuple[Path, str], int | None] | None = None,
 ) -> dict[str, int] | None:
     try:
         if capture_cutoff(event) > capture_cutoff(checkpoint):
@@ -178,12 +187,16 @@ def _cursor_coverage(
         return None
 
     try:
-        event_boundary = _cursor_at_cutoff(
-            transcript_path, event["captured_at"], require_complete=True
+        event_boundary = (
+            _cursor_at_cutoff(
+                transcript_path, event["captured_at"], require_complete=True
+            )
+            if boundaries is None
+            else boundaries.get((transcript_path.resolve(), event["captured_at"]))
         )
     except ValueError:
         return None
-    if checkpoint_offset < event_boundary:
+    if event_boundary is None or checkpoint_offset < event_boundary:
         return None
     return {
         "checkpoint_update_count": checkpoint_update_count,
@@ -192,14 +205,40 @@ def _cursor_coverage(
     }
 
 
+def _coverage_boundaries(
+    events: Iterable[dict[str, Any]],
+) -> dict[tuple[Path, str], int | None]:
+    groups: dict[Path, set[str]] = {}
+    for event in events:
+        try:
+            capture_cutoff(event)
+            if not has_usable_transcript_path(event):
+                continue
+            path = Path(event["transcript_path"]).expanduser().resolve()
+            groups.setdefault(path, set()).add(event["captured_at"])
+        except (OSError, ValueError, TypeError):
+            continue
+    boundaries = {}
+    for transcript, cutoffs in groups.items():
+        try:
+            boundaries.update(
+                ((transcript, cutoff), offset)
+                for cutoff, offset in cutoff_boundaries(transcript, cutoffs).items()
+            )
+        except (OSError, ValueError, TypeError):
+            continue
+    return boundaries
+
+
 def _retire_covered_events(
     paths: list[Path], settings: Settings, packet: dict[str, Any]
 ) -> int:
+    events = {path: load_event(path) for path in paths}
+    boundaries = _coverage_boundaries(events.values())
     covered = []
-    for path in paths:
-        event = load_event(path)
+    for path, event in events.items():
         if settings.checkpoint_enabled:
-            coverage = _checkpoint_coverage(settings, event)
+            coverage = _checkpoint_coverage(settings, event, boundaries)
         else:
             coverage = _cursor_coverage(
                 event,
@@ -208,6 +247,7 @@ def _retire_covered_events(
                     "captured_at": packet["captured_at"],
                     "update_count": 1,
                 },
+                boundaries,
             )
         if coverage is not None:
             covered.append(path)
@@ -217,10 +257,21 @@ def _retire_covered_events(
 
 def reconcile_superseded_failures(settings: Settings) -> int:
     reconciled = 0
+    events = {}
     for path in sorted(settings.failed_dir.glob("*.json")):
         try:
-            event = load_event(path)
-            coverage = _checkpoint_coverage(settings, event)
+            event = resolve_session_event(load_event(path))
+            checkpoint = load_checkpoint(settings, event["session_id"])
+            if checkpoint is not None and capture_cutoff(event) <= capture_cutoff(
+                checkpoint
+            ):
+                events[path] = event
+        except (OSError, ValueError, TypeError):
+            continue
+    boundaries = _coverage_boundaries(events.values())
+    for path, event in events.items():
+        try:
+            coverage = _checkpoint_coverage(settings, event, boundaries)
             if coverage is None:
                 continue
             event["disposition"] = "superseded-by-checkpoint"
@@ -518,6 +569,17 @@ def _run_git_checkpoint_uncontended(settings: Settings) -> dict[str, Any]:
     return {"status": result, "checked_at": checked_at}
 
 
+def _worker_failures(previous: dict[str, Any]) -> dict[str, str]:
+    value = previous.get("failure")
+    if isinstance(value, dict):
+        return {
+            key: "failed"
+            for key in ("backup", "processing", "indexing", "tick")
+            if value.get(key)
+        }
+    return {"tick": "failed"} if value or previous.get("status") == "error" else {}
+
+
 def daemon_once(settings: Settings) -> dict[str, Any]:
     # Serialize the whole timer tick, including maintenance and backup scheduling.
     with ProcessLock(settings.lock_dir / "daemon.lock") as lock:
@@ -530,7 +592,15 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
                 previous = load_event(status_path)
         except (OSError, ValueError):
             pass
-        save_event(status_path, {"checked_at": utc_now(), "status": "running"})
+        failures = _worker_failures(previous)
+        save_event(
+            status_path,
+            {
+                "checked_at": utc_now(),
+                "status": "running",
+                "failure": failures,
+            },
+        )
         try:
             result = _daemon_once(settings)
         except Exception as error:
@@ -540,6 +610,7 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
                     "checked_at": utc_now(),
                     "status": "error",
                     "error": type(error).__name__,
+                    "failure": {**failures, "tick": "failed"},
                 },
             )
             _run_alerts(settings)
@@ -552,29 +623,45 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
         )
         if checkpoint.get("status") == "deferred":
             deferred = deferred or checkpoint.get("reason")
-        failed = bool(processing.get("failed")) or checkpoint.get("status") not in {
-            None,
-            "ok",
-            "clean",
-            "deferred",
-        }
-        failed = failed or maintenance.get("backup_result") not in {
-            None,
-            "ok",
-            "clean",
-            "disabled",
-            "deferred",
-        }
-        failed = failed or bool(indexing_problem(settings))
-        failed = failed or processing.get("reindex_result") not in {None, "ok"}
-        failed = failed or maintenance.get("reindex_result") not in {
-            None,
-            "ok",
-            "not-required",
-        }
+        if processing.get("failed"):
+            failures["processing"] = "failed"
+        elif not processing.get("deferred_reason") and (
+            processing.get("groups_seen") or processing.get("reconciled_failed_events")
+        ):
+            failures.pop("processing", None)
+        backup_results = (checkpoint.get("status"), maintenance.get("backup_result"))
+        if any(
+            value not in {None, "ok", "clean", "disabled", "deferred"}
+            for value in backup_results
+        ):
+            failures["backup"] = "failed"
+        elif any(value in {"ok", "clean"} for value in backup_results):
+            failures.pop("backup", None)
+        index_results = (
+            processing.get("reindex_result"),
+            maintenance.get("reindex_result"),
+        )
+        if indexing_problem(settings) or any(
+            value not in {None, "ok", "not-required"} for value in index_results
+        ):
+            failures["indexing"] = "failed"
+        elif "ok" in index_results:
+            failures.pop("indexing", None)
+        elif "indexing" in failures:
+            try:
+                if (
+                    load_event(settings.state_dir / "index-status.json").get("status")
+                    == "ok"
+                ):
+                    failures.pop("indexing", None)
+            except (OSError, ValueError):
+                pass
+        if not deferred:
+            failures.pop("tick", None)
         status = {
             "checked_at": utc_now(),
-            "status": "error" if failed else ("deferred" if deferred else "ok"),
+            "status": "error" if failures else ("deferred" if deferred else "ok"),
+            "failure": failures,
         }
         if deferred:
             status["deferred_since"] = (

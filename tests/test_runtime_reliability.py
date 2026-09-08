@@ -1116,3 +1116,195 @@ def test_abandoned_index_state_is_actionable(settings):
         },
     )
     assert indexing_problem(settings) == "basic-memory-index-error"
+
+
+@pytest.mark.parametrize("success", ["ok", "clean"])
+def test_backup_failure_survives_running_deferral_and_unrelated_success(
+    settings, monkeypatch, success
+):
+    from obsidian_sidecar import worker
+    from obsidian_sidecar.queueing import runtime_problem
+
+    configured = replace(settings, auto_git_backup=True)
+    status_path = settings.state_dir / "worker-status.json"
+    save_event(
+        settings.state_dir / "maintenance-success.json",
+        {
+            "completed_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    calls = []
+
+    def backup(*_args):
+        calls.append(True)
+        return "unavailable" if len(calls) == 1 else success
+
+    monkeypatch.setattr(worker, "commit_git_backup", backup)
+    assert daemon_once(configured)["checkpoint"]["status"] == "unavailable"
+    assert load_event(status_path)["failure"]["backup"]
+    tick = worker._daemon_once
+    running_states = []
+
+    def observe_running(_settings):
+        state = load_event(status_path)
+        running_states.append(state)
+        assert state["status"] == "running"
+        assert state["failure"]["backup"]
+        assert runtime_problem(settings) == "worker-error"
+        assert not alert_status(settings)["healthy"]
+        return tick(_settings)
+
+    def interrupted(_settings):
+        assert load_event(status_path)["failure"]["backup"]
+        raise RuntimeError("private fixture failure")
+
+    monkeypatch.setattr(worker, "_daemon_once", interrupted)
+    with pytest.raises(RuntimeError):
+        daemon_once(configured)
+    assert load_event(status_path)["failure"]["backup"]
+    assert "private fixture failure" not in status_path.read_text()
+    monkeypatch.setattr(worker, "_daemon_once", observe_running)
+    with CloudLease(settings.vault_path, ttl_seconds=600):
+        result = daemon_once(configured)
+        assert result["checkpoint"]["status"] == "deferred"
+        assert not alert_status(settings)["healthy"]
+        assert load_event(status_path)["failure"]["backup"]
+    assert len(calls) == 1
+
+    monkeypatch.setattr(worker, "_daemon_once", lambda _: {"processing": {}})
+    daemon_once(configured)
+    assert load_event(status_path)["failure"]["backup"]
+    assert not alert_status(settings)["healthy"]
+
+    monkeypatch.setattr(worker, "_daemon_once", observe_running)
+    assert daemon_once(configured)["checkpoint"]["status"] == success
+    assert len(running_states) == 2
+    assert len(calls) == 2
+    assert load_event(status_path)["status"] == "ok"
+    assert not load_event(status_path)["failure"]
+    assert alert_status(settings)["healthy"]
+
+
+@pytest.mark.parametrize(
+    ("destination", "checkpoint_enabled"),
+    [("queue", True), ("queue", False), ("failed", True)],
+)
+def test_group_retirement_scans_once_and_preserves_incomplete_tail(
+    settings, tmp_path, monkeypatch, destination, checkpoint_enabled
+):
+    from obsidian_sidecar import worker
+    from obsidian_sidecar.checkpoints import checkpoint_path
+    from obsidian_sidecar.queueing import move_event
+
+    settings = replace(settings, checkpoint_enabled=checkpoint_enabled)
+    transcript = tmp_path / "group.jsonl"
+    start = datetime(2026, 7, 14, tzinfo=UTC)
+    stamps = [(start + timedelta(seconds=index)).isoformat() for index in range(102)]
+    content = b"".join(
+        (
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "timestamp": stamps[index],
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": f"Record {index}"}],
+                    },
+                }
+            )
+            + "\n"
+        ).encode()
+        for index in range(100)
+    )
+    tail = (
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": stamps[100],
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Unseen eligible tail"}],
+                },
+            }
+        )
+        + "\n"
+    ).encode()
+    snapshot = content + tail[:25]
+    transcript.write_bytes(snapshot)
+    paths = [
+        enqueue_event(
+            settings,
+            {
+                "session_id": SESSION,
+                "cwd": str(tmp_path),
+                "transcript_path": str(transcript),
+                "captured_at": stamp,
+            },
+        )
+        for stamp in [*stamps[:99], stamps[101]]
+    ]
+    if destination == "failed":
+        paths = [move_event(path, settings.failed_dir) for path in paths]
+    cursor = {"transcript_path": str(transcript), "byte_offset": len(content)}
+    checkpoint = {
+        "version": 1,
+        "session_id": SESSION,
+        "curation": {},
+        "captured_at": stamps[101],
+        "cursor": cursor,
+        "update_count": 1,
+    }
+    packet = {"captured_at": stamps[101], "checkpoint": {"cursor": cursor}}
+    if checkpoint_enabled:
+        save_event(checkpoint_path(settings, SESSION), checkpoint)
+    original_open = Path.open
+    scans = []
+
+    class Meter:
+        def __init__(self, handle, measured):
+            self.handle = handle
+            self.measured = measured
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def readline(self, size=-1):
+            line = self.handle.readline(size)
+            self.measured.append(len(line))
+            return line
+
+    @contextmanager
+    def scanned(path, *args, **kwargs):
+        measured = []
+        scans.append(measured)
+        with original_open(path, *args, **kwargs) as handle:
+            yield Meter(handle, measured)
+        if len(scans) == 1:
+            with original_open(path, "ab") as handle:
+                handle.write(tail[25:])
+
+    def counted_open(path, mode="r", *args, **kwargs):
+        if path == transcript and mode == "rb":
+            return scanned(path, mode, *args, **kwargs)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+
+    def retire(remaining):
+        if destination == "failed":
+            return worker.reconcile_superseded_failures(settings)
+        return worker._retire_covered_events(remaining, settings, packet)
+
+    assert retire(paths) == 99
+    assert len(scans) == 1
+    assert sum(scans[0]) == len(snapshot)
+    assert all(not path.exists() for path in paths[:-1])
+    assert paths[-1].exists()
+    assert retire([paths[-1]]) == 0
+    cursor["byte_offset"] = len(content + tail)
+    if checkpoint_enabled:
+        save_event(checkpoint_path(settings, SESSION), checkpoint)
+    assert retire([paths[-1]]) == 1
+    assert not paths[-1].exists()
