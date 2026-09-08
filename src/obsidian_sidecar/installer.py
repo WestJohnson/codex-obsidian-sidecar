@@ -42,6 +42,7 @@ class SetupOptions:
     install_service: bool = True
     register_basic_memory: bool = True
     enable_update_checks: bool = True
+    freshness_project_days: int | None = None
 
 
 def _run(
@@ -203,6 +204,11 @@ def _service_paths(label: str) -> list[Path]:
 
 
 def _validate_options(options: SetupOptions) -> None:
+    if (
+        options.freshness_project_days is not None
+        and not 1 <= options.freshness_project_days <= 3650
+    ):
+        raise ValueError("Project freshness days must be between 1 and 3650")
     vault = options.vault_path.expanduser()
     codex = options.codex_bin.expanduser()
     if not vault.is_dir():
@@ -392,9 +398,6 @@ def _config_bytes(options: SetupOptions) -> bytes:
             "sidecar_executable": str(_resolved_executable(options)),
             "model": options.model,
             "basic_memory_project": options.basic_memory_project,
-            "freshness_project_days": 30,
-            "freshness_decision_days": 90,
-            "freshness_runbook_days": 14,
             "runtime_role": "local",
             "service_label": options.service_label,
             "update_checks_enabled": options.enable_update_checks,
@@ -407,6 +410,11 @@ def _config_bytes(options: SetupOptions) -> bytes:
             },
         }
     )
+    raw.setdefault("freshness_project_days", 30)
+    if options.freshness_project_days is not None:
+        raw["freshness_project_days"] = options.freshness_project_days
+    raw.setdefault("freshness_decision_days", 90)
+    raw.setdefault("freshness_runbook_days", 14)
     raw.setdefault("checkpoint_enabled", True)
     raw.setdefault("checkpoint_max_evidence_chars", 20_000)
     raw.setdefault("curator_usage_logging", True)
@@ -498,9 +506,37 @@ def _basic_memory_registration(project: str, vault: Path) -> dict[str, Any]:
     return {"status": "created", "project": project, "path": str(vault.absolute())}
 
 
+def _launchd_disabled(options: SetupOptions) -> bool:
+    result = _run(["launchctl", "print-disabled", f"gui/{os.getuid()}"], timeout=20)
+    if result.returncode != 0:
+        raise RuntimeError("Could not read launchd disabled state")
+    block = re.search(r"disabled services\s*=\s*\{(.*?)\}", result.stdout, re.DOTALL)
+    if block is None:
+        raise RuntimeError("Could not parse launchd disabled state")
+    target = re.search(
+        rf'"{re.escape(options.service_label)}"\s*=>\s*([^\n,}}]*)', block.group(1)
+    )
+    if target is None:
+        if f'"{options.service_label}"' in block.group(1):
+            raise RuntimeError("Could not parse launchd disabled state for target")
+        return False
+    value = target.group(1).strip()
+    if value in {"true", "disabled"}:
+        return True
+    if value in {"false", "enabled"}:
+        return False
+    raise RuntimeError("Unrecognized launchd disabled state for target")
+
+
 def _reload_service(options: SetupOptions) -> dict[str, Any]:
     if sys.platform == "darwin":
         target = f"gui/{os.getuid()}"
+        enabled = _run(
+            ["launchctl", "enable", f"{target}/{options.service_label}"],
+            timeout=20,
+        )
+        if enabled.returncode != 0:
+            raise RuntimeError(f"launchd enable failed: {enabled.stderr.strip()[:500]}")
         _run(
             ["launchctl", "bootout", f"{target}/{options.service_label}"],
             timeout=20,
@@ -511,14 +547,8 @@ def _reload_service(options: SetupOptions) -> dict[str, Any]:
             raise RuntimeError(
                 f"launchd bootstrap failed: {loaded.stderr.strip()[:500]}"
             )
-        started = _run(
-            ["launchctl", "kickstart", "-k", f"{target}/{options.service_label}"],
-            timeout=20,
-        )
-        if started.returncode != 0:
-            raise RuntimeError(
-                f"launchd kickstart failed: {started.stderr.strip()[:500]}"
-            )
+        # RunAtLoad already starts the worker. A forced kickstart can kill it
+        # mid-write immediately after bootstrap and strand its shared lease.
         return {"manager": "launchd", "status": "loaded"}
     systemctl = shutil.which("systemctl")
     if not systemctl:
@@ -549,6 +579,11 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
     if options.install_codex_hook:
         touched.append(hooks)
     touched.extend(service_paths)
+    launchd_disabled = (
+        _launchd_disabled(options)
+        if options.install_service and sys.platform == "darwin"
+        else None
+    )
     snapshots = {path: _snapshot(path) for path in touched}
     backups: list[str] = []
     for path, (content, mode) in snapshots.items():
@@ -559,6 +594,7 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
         backups.append(str(backup))
     basic_memory: dict[str, Any] | None = None
     service: dict[str, Any] | None = None
+    service_reload_started = False
     try:
         options.state_dir.expanduser().mkdir(parents=True, exist_ok=True, mode=0o700)
         _write_bytes(config, _config_bytes(options), 0o600)
@@ -578,13 +614,27 @@ def apply_setup(options: SetupOptions) -> dict[str, Any]:
                 options.vault_path.expanduser().absolute(),
             )
         if options.install_service:
+            service_reload_started = True
             service = _reload_service(options)
     except Exception:
-        for path, (content, mode) in snapshots.items():
-            if content is None:
-                path.unlink(missing_ok=True)
-            else:
-                _write_bytes(path, content, mode)
+        try:
+            for path, (content, mode) in snapshots.items():
+                if content is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    _write_bytes(path, content, mode)
+        finally:
+            if service_reload_started and launchd_disabled is not None:
+                restored = _run(
+                    [
+                        "launchctl",
+                        "disable" if launchd_disabled else "enable",
+                        f"gui/{os.getuid()}/{options.service_label}",
+                    ],
+                    timeout=20,
+                )
+                if restored.returncode != 0:
+                    raise RuntimeError("Could not restore launchd disabled state")
         raise
     verification = verify_setup(load_settings(config), config_path=config)
     return {

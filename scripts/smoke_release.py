@@ -41,6 +41,9 @@ def smoke(wheel: Path, bundle: Path) -> dict[str, object]:
             "/AGENTS.md",
             "/.agents/skills/obsidian-sidecar-setup/SKILL.md",
             "/docs/KNOWLEDGE_STATE.md",
+            "/docs/TESTING.md",
+            "/docs/OPERATIONS.md",
+            "/docs/CLOUD_SYNC.md",
             f"/artifacts/{wheel.name}",
         }
         missing = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,30 @@ def test_setup_preserves_hooks_and_is_idempotent(
     assert "api_key" not in config
 
 
+def test_setup_preserves_existing_freshness_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options.config_path.parent.mkdir(parents=True)
+    options.config_path.write_text(
+        json.dumps(
+            {
+                "freshness_project_days": 90,
+                "freshness_decision_days": 120,
+                "freshness_runbook_days": 21,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    apply_setup(options)
+
+    config = json.loads(options.config_path.read_text(encoding="utf-8"))
+    assert config["freshness_project_days"] == 90
+    assert config["freshness_decision_days"] == 120
+    assert config["freshness_runbook_days"] == 21
+
+
 def test_setup_migrates_an_existing_sidecar_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,3 +195,146 @@ def test_setup_rejects_missing_vault(
 
     with pytest.raises(FileNotFoundError, match="vault does not exist"):
         setup_plan(missing)
+
+
+def test_macos_service_reload_clears_a_stale_disabled_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options = SetupOptions(
+        **{
+            **options.__dict__,
+            "install_service": True,
+            "service_label": "com.example.sidecar",
+        }
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str], *, timeout: int = 20, check: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, check
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer.os, "getuid", lambda: 501)
+    monkeypatch.setattr(installer, "_run", fake_run)
+
+    result = installer._reload_service(options)
+
+    assert result == {"manager": "launchd", "status": "loaded"}
+    assert calls[0] == [
+        "launchctl",
+        "enable",
+        "gui/501/com.example.sidecar",
+    ]
+    assert calls[1][0:2] == ["launchctl", "bootout"]
+    assert calls[2][0:2] == ["launchctl", "bootstrap"]
+    assert len(calls) == 3  # RunAtLoad starts once, without killing the new worker.
+
+
+@pytest.mark.parametrize(
+    ("token", "previous_disabled"),
+    [
+        ("true", True),
+        ("false", False),
+        ("disabled", True),
+        ("enabled", False),
+        (None, None),
+    ],
+)
+def test_failed_macos_setup_restores_disabled_state_and_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token: str | None,
+    previous_disabled: bool | None,
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options = SetupOptions(
+        **{
+            **options.__dict__,
+            "install_service": True,
+            "service_label": "com.example.sidecar",
+        }
+    )
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer.os, "getuid", lambda: 501)
+    plist = installer._service_paths(options.service_label)[0]
+    plist.parent.mkdir(parents=True)
+    original_plist = b"original service definition"
+    plist.write_bytes(original_plist)
+    options.config_path.parent.mkdir(parents=True)
+    original_config = b'{"original": true}\n'
+    options.config_path.write_bytes(original_config)
+    disabled = {"com.example.unrelated": True}
+    if previous_disabled is not None:
+        disabled[options.service_label] = previous_disabled
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        action = command[1]
+        if action == "print-disabled":
+            assert command[2] == "gui/501"
+            records = "\n".join(
+                f'"{label}" => {token if label == options.service_label else str(value).lower()}'
+                for label, value in disabled.items()
+            )
+            return subprocess.CompletedProcess(
+                command, 0, f"disabled services = {{\n{records}\n}}", ""
+            )
+        if action in {"enable", "disable"}:
+            assert command[2] == "gui/501/com.example.sidecar"
+            disabled[options.service_label] = action == "disable"
+        elif action == "bootstrap":
+            assert disabled[options.service_label] is False
+            return subprocess.CompletedProcess(command, 5, "", "fixture failure")
+        else:
+            assert action == "bootout"
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(installer, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="launchd bootstrap failed"):
+        apply_setup(options)
+
+    assert disabled[options.service_label] is (previous_disabled is True)
+    assert disabled["com.example.unrelated"] is True
+    assert plist.read_bytes() == original_plist
+    assert options.config_path.read_bytes() == original_config
+    assert not (Path.home() / ".codex/hooks.json").exists()
+    assert calls[0][1] == "print-disabled"
+    assert calls[-1][1] == ("disable" if previous_disabled else "enable")
+
+
+@pytest.mark.parametrize(
+    ("returncode", "output"),
+    [(1, ""), (0, "invalid output")]
+    + [
+        (
+            0,
+            f'disabled services = {{\n"{installer.DEFAULT_SERVICE_LABEL}" => {token}\n}}',
+        )
+        for token in ("unknown", "true-ish", "disabled-ish", "")
+    ],
+)
+def test_macos_setup_requires_readable_disabled_state_before_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, output: str
+) -> None:
+    options = _options(tmp_path, monkeypatch)
+    options = SetupOptions(**{**options.__dict__, "install_service": True})
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    calls = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, returncode, output, "")
+
+    monkeypatch.setattr(installer, "_run", fake_run)
+    with pytest.raises(RuntimeError, match="launchd disabled state"):
+        apply_setup(options)
+    assert len(calls) == 1
+    assert calls[0][1] == "print-disabled"
+    assert not options.config_path.exists()
+    assert not (Path.home() / ".codex/hooks.json").exists()
+    assert not installer._service_paths(options.service_label)[0].exists()

@@ -25,7 +25,7 @@ def test_worker_processes_end_to_end(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     enqueue_event(
         settings,
@@ -57,7 +57,7 @@ def test_worker_normalizes_safe_topic_metadata_before_validation(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     curation = deepcopy(valid_curation)
     curation["topics"] = [f"topic-{index}" for index in range(14)]
@@ -78,9 +78,7 @@ def test_worker_normalizes_safe_topic_metadata_before_validation(
     assert result.failed == 0
     assert result.notes_written == 1
     assert checkpoint is not None
-    assert checkpoint["curation"]["topics"] == [
-        f"topic-{index}" for index in range(12)
-    ]
+    assert checkpoint["curation"]["topics"] == [f"topic-{index}" for index in range(12)]
 
 
 def test_worker_self_compacts_saturated_checkpoint_output(
@@ -91,7 +89,7 @@ def test_worker_self_compacts_saturated_checkpoint_output(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     base_event = {
         "session_id": "fixture-session-001",
@@ -101,9 +99,7 @@ def test_worker_self_compacts_saturated_checkpoint_output(
         "captured_at": "2026-07-14T08:01:00Z",
     }
     enqueue_event(settings, base_event)
-    first = process_ready(
-        settings, force=True, curator=StaticCurator(valid_curation)
-    )
+    first = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
     assert first.failed == 0
     with transcript_path.open("a", encoding="utf-8") as handle:
         handle.write(
@@ -192,7 +188,7 @@ def test_worker_reconciles_only_failed_events_covered_by_a_committed_cursor(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     event = {
         "session_id": "fixture-session-001",
@@ -244,13 +240,16 @@ def test_worker_reconciles_only_failed_events_covered_by_a_committed_cursor(
     assert not covered.exists()
     assert uncovered.exists()
     processed = next(
-        settings.processed_dir.glob("covered--max-attempts--superseded-by-checkpoint.json")
+        settings.processed_dir.glob(
+            "covered--max-attempts--superseded-by-checkpoint.json"
+        )
     )
     record = json.loads(processed.read_text(encoding="utf-8"))
     assert record["disposition"] == "superseded-by-checkpoint"
-    assert record["reconciliation"]["checkpoint_byte_offset"] >= record[
-        "reconciliation"
-    ]["event_boundary_byte_offset"]
+    assert (
+        record["reconciliation"]["checkpoint_byte_offset"]
+        >= record["reconciliation"]["event_boundary_byte_offset"]
+    )
 
 
 def test_worker_uses_saved_checkpoint_for_the_next_turn(
@@ -261,7 +260,7 @@ def test_worker_uses_saved_checkpoint_for_the_next_turn(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     first_event = {
         "session_id": "fixture-session-001",
@@ -336,9 +335,7 @@ def test_worker_uses_saved_checkpoint_for_the_next_turn(
         {**first_event, "turn_id": "turn-2", "captured_at": "2026-07-14T08:03:00Z"},
     )
 
-    second = process_ready(
-        settings, force=True, curator=StaticCurator(second_curation)
-    )
+    second = process_ready(settings, force=True, curator=StaticCurator(second_curation))
 
     assert second.failed == 0
     checkpoint = load_checkpoint(settings, "fixture-session-001")
@@ -359,7 +356,7 @@ def test_failed_vault_write_does_not_advance_checkpoint(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "obsidian_sidecar.worker.reindex_basic_memory", lambda _settings: "ok"
+        "obsidian_sidecar.maintenance._reindex_basic_memory", lambda *a, **k: "ok"
     )
     event = {
         "session_id": "fixture-session-001",
@@ -398,14 +395,13 @@ def test_failed_vault_write_does_not_advance_checkpoint(
     for field in ("decisions", "changes", "verification", "unresolved", "next_actions"):
         for item in retry_curation[field]:
             item["evidence_ids"] = ["c1"]
+
     def fail_write(*_args, **_kwargs):
         raise OSError("simulated write failure")
 
     monkeypatch.setattr("obsidian_sidecar.worker.write_curation", fail_write)
 
-    result = process_ready(
-        settings, force=True, curator=StaticCurator(retry_curation)
-    )
+    result = process_ready(settings, force=True, curator=StaticCurator(retry_curation))
 
     assert result.failed == 1
     assert path.read_bytes() == before
@@ -494,7 +490,7 @@ def test_worker_redacts_secrets_from_failure_state(
     assert "[REDACTED_SECRET]" in log
 
 
-def test_worker_consumes_legacy_event_without_transcript_path(
+def test_worker_preserves_legacy_event_without_transcript_path_as_failure(
     settings: Settings, valid_curation: dict
 ) -> None:
     legacy = settings.queue_dir / "legacy-missing-transcript.json"
@@ -509,15 +505,13 @@ def test_worker_consumes_legacy_event_without_transcript_path(
         encoding="utf-8",
     )
 
-    result = process_ready(
-        settings, force=True, curator=StaticCurator(valid_curation)
-    )
+    result = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
 
-    assert result.skipped == 1
-    assert result.failed == 0
-    assert result.processed_events == 1
+    assert result.skipped == 0
+    assert result.failed == 1
+    assert result.processed_events == 0
     assert not list(settings.queue_dir.glob("*.json"))
-    assert (settings.processed_dir / legacy.name).exists()
+    assert (settings.failed_dir / legacy.name).exists()
 
 
 def test_worker_defers_while_cloud_maintenance_lease_is_active(
@@ -556,7 +550,9 @@ def test_daemon_creates_hourly_dirty_git_checkpoint(settings: Settings) -> None:
         git_checkpoint_interval_seconds=3600,
         alerts_enabled=False,
     )
-    (configured.state_dir / "health.json").write_text("{}", encoding="utf-8")
+    (configured.state_dir / "maintenance-success.json").write_text(
+        json.dumps({"completed_at": datetime.now(UTC).isoformat()}), encoding="utf-8"
+    )
     note = configured.vault_path / "manual-note.md"
     note.write_text("# Manual note\n", encoding="utf-8")
     result = daemon_once(configured)

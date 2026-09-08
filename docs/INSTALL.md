@@ -15,8 +15,7 @@ require root, a public server, or an API key for local operation.
 - `notify-send` when Linux desktop notifications are desired (see
   [Operations](OPERATIONS.md#runtime-topology)).
 
-Windows can run the package and worker manually, but the production installer
-does not create a Windows scheduler task.
+Native Windows is unsupported: the runtime requires Unix `fcntl` process locks.
 
 ## Agent-Driven Installation
 
@@ -63,6 +62,16 @@ obsidian-sidecar setup \
 
 Review the JSON action list, then apply the same command with `--apply`.
 
+### Freshness Policy During Setup
+
+Setup preserves existing `freshness_project_days`, `freshness_decision_days`,
+and `freshness_runbook_days` values. Missing values use the defaults described
+in [Knowledge State](KNOWLEDGE_STATE.md#freshness-envelope).
+Add `--freshness-project-days 90` to the setup plan to explicitly change the
+project review interval, then apply that same plan. The override accepts
+1–3650 days; omitting it preserves the existing project policy. Changing policy
+does not reverify notes or rewrite their existing freshness dates.
+
 ## Verification
 
 ```sh
@@ -72,8 +81,8 @@ obsidian-sidecar benchmark
 ```
 
 Open a fresh Codex session and review/trust the Stop hook before relying on
-automatic capture. A benchmark passes only at 80 or higher with every critical
-gate passing.
+automatic capture. Require the benchmark to meet the
+[acceptance standard](TESTING.md#acceptance-standard).
 
 ## Files Touched
 

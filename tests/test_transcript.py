@@ -1,5 +1,8 @@
 import json
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from obsidian_sidecar.security import REDACTION
 from obsidian_sidecar.transcript import (
@@ -418,3 +421,121 @@ def test_packet_records_lightweight_model_provenance(tmp_path: Path) -> None:
         "provider": "openai",
         "harness": "codex-tui",
     }
+
+
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+@pytest.mark.parametrize(
+    "explicit_session", [None, "fixture-session-001", "explicit-session"]
+)
+def test_transcript_only_incremental_routing_preserves_git_and_artifact_base(
+    transcript_path: Path,
+    tmp_path: Path,
+    valid_curation: dict,
+    explicit_cwd: bool,
+    explicit_session: str | None,
+) -> None:
+    projects = [tmp_path / "header project", tmp_path / "event project"]
+    for index, project in enumerate(projects):
+        project.mkdir()
+        subprocess.run(["git", "init", "--quiet", str(project)], check=True)
+        (project / "result.md").write_text("# Verified result\n", encoding="utf-8")
+        (project / f"project-{index}.txt").touch()
+    lines = transcript_path.read_text(encoding="utf-8").splitlines()
+    header = json.loads(lines[0])
+    header["payload"]["cwd"] = str(projects[0])
+    lines[0] = json.dumps(header)
+    transcript_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    event = {
+        "transcript_path": str(transcript_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+        "turn_id": "explicit-turn",
+    }
+    selected = int(explicit_cwd)
+    if explicit_session:
+        event["session_id"] = explicit_session
+    if explicit_cwd:
+        event["cwd"] = str(projects[selected])
+    first = build_curation_packet(event)
+    checkpoint = {
+        "session_id": first["session_id"],
+        "cursor": first["checkpoint"]["cursor"],
+        "update_count": 1,
+        "curation": valid_curation,
+    }
+    _append_message(
+        transcript_path,
+        timestamp="2026-07-14T08:02:00Z",
+        role="assistant",
+        phase="final_answer",
+        text="Verified [Result](result.md).",
+    )
+
+    packet = build_curation_packet(
+        {**event, "captured_at": "2026-07-14T08:03:00Z"}, checkpoint=checkpoint
+    )
+
+    assert packet["checkpoint"]["mode"] == "incremental"
+    assert packet["session_id"] == (explicit_session or "fixture-session-001")
+    assert packet["turn_id"] == "explicit-turn"
+    assert packet["cwd"] == str(projects[selected])
+    assert packet["artifacts"] == [
+        {
+            "label": "Result",
+            "path": str(projects[selected] / "result.md"),
+            "evidence_id": "a1",
+        }
+    ]
+    git_status = next(
+        item["text"]
+        for item in packet["evidence"]
+        if item.get("label") == "Working tree status"
+    )
+    assert f"project-{selected}.txt" in git_status
+    assert f"project-{1 - selected}.txt" not in git_status
+
+
+@pytest.mark.parametrize("mode", ["baseline", "recovery"])
+@pytest.mark.parametrize("message_size", [20, 15_000])
+def test_tail_packets_preserve_last_sixteen_and_character_budget(
+    transcript_path: Path, tmp_path: Path, mode: str, message_size: int
+) -> None:
+    from obsidian_sidecar.transcript import MAX_MESSAGE_CHARS, MAX_PACKET_CHARS
+
+    for index in range(20):
+        _append_message(
+            transcript_path,
+            timestamp="2026-07-14T08:02:00Z",
+            role="user",
+            text=f"Request {index:02d}: " + "x" * message_size,
+        )
+    checkpoint = (
+        None
+        if mode == "baseline"
+        else {
+            "session_id": "fixture-session-001",
+            "curation": {},
+            "update_count": 1,
+            "cursor": {"byte_offset": transcript_path.stat().st_size + 1},
+        }
+    )
+    packet = build_curation_packet(
+        {
+            "session_id": "fixture-session-001",
+            "transcript_path": str(transcript_path),
+            "cwd": str(tmp_path),
+            "captured_at": "2026-07-14T08:03:00Z",
+        },
+        checkpoint=checkpoint,
+    )
+    messages = [
+        item["text"] for item in packet["evidence"] if item["kind"] == "conversation"
+    ]
+    assert packet["checkpoint"]["mode"] == mode
+    assert messages[0].startswith("Request 04:")
+    assert len(messages) == (16 if message_size == 20 else 5)
+    assert all(len(message) <= MAX_MESSAGE_CHARS for message in messages)
+    assert sum(map(len, messages)) <= MAX_PACKET_CHARS
+    assert (
+        packet["checkpoint"]["cursor"]["byte_offset"] == transcript_path.stat().st_size
+    )
+    assert packet["checkpoint"]["has_more"] is False

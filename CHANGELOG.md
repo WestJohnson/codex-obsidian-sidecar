@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.4 - 2026-09-07
+
+- Defer local-writer contention without crashing or spending capture retries;
+  distinguish local and cloud leases and fail closed on malformed lease data.
+- Keep backup checkpoints due after contention or failure. Use process-owned
+  locks so long-running local workers do not lose their lock after 15 minutes.
+- Retain incomplete hook routing metadata privately and recover only from an
+  exact session ID and matching transcript header. Never guess the newest
+  session. Surface unresolved captures after 30 minutes and preserve failures
+  after a day; no raw hook text is retained.
+- Include unresolved captures and stale, failed, or persistently deferred
+  workers in actionable alerts and health scoring, with a maintenance-failure
+  ceiling below 80. Normal short contention is not a failure.
+- Preserve existing freshness policy during setup; expose an explicit project
+  review interval override. Enable disabled launchd jobs and avoid killing the
+  RunAtLoad worker with a second forced start.
+- Detect Basic Memory 0.23's observation-only status and explicitly complete a
+  search-only index pass. Do not mistake its compatibility `--wait` for index
+  readiness. Keep desktop Obsidian CLI optional in Linux health checks.
+- Require every local benchmark case to pass and retain acceptance results
+  when report publication is deferred; allow publication to be retried alone.
+- Keep daily maintenance independent of health refreshes and retry deferred
+  nightly maintenance through the existing reconnect timer, even without a
+  staged report. Preserve sync-error reporting during real failures.
+- Retain unfinished transcript tails, resolve transcript-only session identity
+  before checkpoint lookup, and distinguish active from interrupted indexing.
+- Include the testing, operations, and cloud-sync guides in offline bundles.
+- Preserve real failures through contention, serialize cloud and reconnect
+  status transitions, and resolve processing alerts after successful manual
+  recovery without clearing unrelated failures. Publication-only retries do
+  not trigger fresh analysis when a staged report becomes stale.
+- Compute grouped capture cutoffs in one transcript snapshot and accept complete
+  long routing headers without retaining their instructions as model evidence.
+
 ## 0.6.3 - 2026-08-19
 
 - Made the live benchmark use a stable schema-safe working-directory name so

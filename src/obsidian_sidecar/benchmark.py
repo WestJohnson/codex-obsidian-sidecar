@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import select
@@ -18,14 +19,14 @@ from typing import Callable
 
 from .checkpoints import checkpoint_path, load_checkpoint
 from .config import Settings
-from .coordination import LocalWriterLease, cloud_lease_status
+from .coordination import LEASE_PATH, LeaseBusy, LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, StaticCurator
 from .maintenance import commit_git_backup, inspect_vault, reindex_basic_memory
-from .queueing import enqueue_event, ready_groups
+from .queueing import enqueue_event, load_event, ready_groups, save_event
 from .security import REDACTION, contains_secret, redact_text
 from .transcript import build_curation_packet, extract_messages
 from .validation import validate_curation
-from .vault import parse_frontmatter, write_curation, write_quarantine
+from .vault import _atomic_write, parse_frontmatter, write_curation, write_quarantine
 from .worker import process_ready
 
 
@@ -185,14 +186,14 @@ def _background_service_health(settings: Settings) -> str:
 def _live_writer_guard(settings: Settings):
     active, reason, _ = cloud_lease_status(settings.vault_path)
     if active:
-        raise RuntimeError(f"cloud maintenance lease is {reason}")
+        raise LeaseBusy(LEASE_PATH, reason)
     with LocalWriterLease(
         settings.vault_path,
         ttl_seconds=max(900, settings.curator_timeout_seconds + 300),
     ):
         active, reason, _ = cloud_lease_status(settings.vault_path)
         if active:
-            raise RuntimeError(f"cloud maintenance lease is {reason}")
+            raise LeaseBusy(LEASE_PATH, reason)
         yield
 
 
@@ -613,11 +614,23 @@ def run_benchmark(settings: Settings) -> dict:
 
         record("live-complete-pipeline", 10, True, live_pipeline)
 
+    return _finish_benchmark(settings, results)
+
+
+@contextmanager
+def _benchmark_result_lock(settings: Settings):
+    settings.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (settings.lock_dir / "benchmark-results.lock").open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
+def _finish_benchmark(settings: Settings, results: list[CaseResult]) -> dict:
     score = sum(case.weight for case in results if case.passed)
     critical_failures = [
         case.name for case in results if case.critical and not case.passed
     ]
-    passed = score >= 80 and not critical_failures
+    passed = score >= 80 and all(case.passed for case in results)
     output = {
         "benchmark": "obsidian-sidecar-e2e-v1",
         "ran_at": datetime.now(UTC).isoformat(),
@@ -627,10 +640,20 @@ def run_benchmark(settings: Settings) -> dict:
         "critical_failures": critical_failures,
         "cases": [asdict(case) for case in results],
     }
-    results_dir = settings.state_dir / "benchmark-results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    result_path = results_dir / "latest.json"
-    result_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+    result_path = settings.state_dir / "benchmark-results" / "latest.json"
+    with _benchmark_result_lock(settings):
+        save_event(result_path, output)
+        return _publish_benchmark_report(settings, output)
+
+
+def publish_benchmark_report(settings: Settings) -> dict:
+    result_path = settings.state_dir / "benchmark-results" / "latest.json"
+    with _benchmark_result_lock(settings):
+        return _publish_benchmark_report(settings, load_event(result_path))
+
+
+def _publish_benchmark_report(settings: Settings, output: dict) -> dict:
+    results = [CaseResult(**case) for case in output["cases"]]
     report_path = settings.vault_path / "_System" / "Health" / "benchmark-latest.md"
     lines = [
         "---",
@@ -642,9 +665,9 @@ def run_benchmark(settings: Settings) -> dict:
         "",
         "# Obsidian Sidecar Benchmark",
         "",
-        f"**Score:** {score}/100  ",
+        f"**Score:** {output['score']}/100  ",
         "**Threshold:** 80/100  ",
-        f"**Result:** {'PASS' if passed else 'FAIL'}",
+        f"**Result:** {'PASS' if output['passed'] else 'FAIL'}",
         "",
         "## Cases",
         "",
@@ -653,7 +676,12 @@ def run_benchmark(settings: Settings) -> dict:
         lines.append(
             f"- {'PASS' if case.passed else 'FAIL'} `{case.name}` ({case.weight} points): {case.detail}"
         )
-    with _live_writer_guard(settings):
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        with _live_writer_guard(settings):
+            _atomic_write(report_path, "\n".join(lines) + "\n")
+    except LeaseBusy as error:
+        output["report_publication"] = {"status": "deferred", "reason": error.reason}
+    else:
+        output["report_publication"] = {"status": "published"}
+    save_event(settings.state_dir / "benchmark-results" / "latest.json", output)
     return output

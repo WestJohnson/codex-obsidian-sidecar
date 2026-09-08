@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -54,9 +56,7 @@ def _session_metadata(
     }
 
 
-def _turn_metadata(
-    current: dict[str, Any], payload: dict[str, Any]
-) -> dict[str, Any]:
+def _turn_metadata(current: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     return {
         **current,
         "turn_id": payload.get("turn_id") or current.get("turn_id"),
@@ -88,9 +88,7 @@ def _model_provenance(
         else {}
     )
     values = {
-        "model": event.get("model")
-        or metadata.get("model")
-        or previous.get("model"),
+        "model": event.get("model") or metadata.get("model") or previous.get("model"),
         "effort": metadata.get("reasoning_effort") or previous.get("effort"),
         "provider": metadata.get("model_provider") or previous.get("provider"),
         "harness": metadata.get("originator")
@@ -137,13 +135,30 @@ def extract_messages(
     *,
     before_timestamp: str | None = None,
 ) -> tuple[dict[str, Any], list[TranscriptMessage]]:
+    batch = extract_message_tail(transcript_path, before_timestamp=before_timestamp)
+    return batch.metadata, batch.messages
+
+
+def extract_message_tail(
+    transcript_path: Path,
+    *,
+    before_timestamp: str | None = None,
+) -> TranscriptBatch:
     metadata: dict[str, Any] = {}
-    raw_messages: list[tuple[str, str, str | None]] = []
-    with transcript_path.open("r", encoding="utf-8", errors="replace") as handle:
-        for line in handle:
+    raw_messages: deque[tuple[str, str, str | None]] = deque(maxlen=16)
+    has_more = False
+    with transcript_path.open("rb") as handle:
+        while True:
+            cursor_end = handle.tell()
+            line = handle.readline()
+            if not line:
+                break
             try:
-                event = json.loads(line)
+                event = json.loads(line.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
+                if not line.endswith(b"\n"):
+                    has_more = True
+                    break
                 continue
             if _past_cutoff(event.get("timestamp"), before_timestamp):
                 break
@@ -151,9 +166,7 @@ def extract_messages(
             if not isinstance(payload, dict):
                 continue
             if event.get("type") == "session_meta":
-                metadata = _session_metadata(
-                    metadata, payload, event.get("timestamp")
-                )
+                metadata = _session_metadata(metadata, payload, event.get("timestamp"))
                 continue
             if event.get("type") == "turn_context":
                 metadata = _turn_metadata(metadata, payload)
@@ -174,7 +187,7 @@ def extract_messages(
     counters = {"user": 0, "assistant": 0}
     messages: list[TranscriptMessage] = []
     total_chars = 0
-    for role, text, timestamp in raw_messages[-16:]:
+    for role, text, timestamp in raw_messages:
         if total_chars >= MAX_PACKET_CHARS:
             break
         remaining = MAX_PACKET_CHARS - total_chars
@@ -185,7 +198,16 @@ def extract_messages(
             TranscriptMessage(f"{prefix}{counters[role]}", role, text, timestamp)
         )
         total_chars += len(text)
-    return metadata, messages
+    return TranscriptBatch(
+        metadata=metadata,
+        messages=messages,
+        cursor={
+            "transcript_path": str(transcript_path),
+            "byte_offset": cursor_end,
+            "after_timestamp": None,
+        },
+        has_more=has_more,
+    )
 
 
 def _after_timestamp(value: str | None, threshold: str | None) -> bool:
@@ -210,7 +232,9 @@ def _past_cutoff(value: str | None, cutoff: str | None) -> bool:
         return False
 
 
-def _cursor_at_cutoff(transcript_path: Path, cutoff: str | None) -> int:
+def _cursor_at_cutoff(
+    transcript_path: Path, cutoff: str | None, *, require_complete: bool = False
+) -> int:
     """Return the first byte not belonging to the completed hook event."""
 
     with transcript_path.open("rb") as handle:
@@ -223,10 +247,50 @@ def _cursor_at_cutoff(transcript_path: Path, cutoff: str | None) -> int:
                 event = json.loads(raw_line.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 if not raw_line.endswith(b"\n"):
+                    if require_complete:
+                        raise ValueError(
+                            "Transcript cutoff contains an unfinished record"
+                        )
                     return line_start
                 continue
             if _past_cutoff(event.get("timestamp"), cutoff):
                 return line_start
+
+
+def cutoff_boundaries(
+    transcript_path: Path, cutoffs: Iterable[str]
+) -> dict[str, int | None]:
+    pending = sorted(
+        (datetime.fromisoformat(value.replace("Z", "+00:00")), value)
+        for value in set(cutoffs)
+    )
+    boundaries: dict[str, int | None] = {value: None for _, value in pending}
+    index = 0
+    with transcript_path.open("rb") as handle:
+        limit = os.fstat(handle.fileno()).st_size
+        while index < len(pending):
+            start = handle.tell()
+            line = handle.readline(limit - start)
+            if not line:
+                for _, cutoff in pending[index:]:
+                    boundaries[cutoff] = start
+                break
+            try:
+                event = json.loads(line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                if not line.endswith(b"\n"):
+                    break
+                continue
+            try:
+                timestamp = datetime.fromisoformat(
+                    event["timestamp"].replace("Z", "+00:00")
+                )
+                while index < len(pending) and timestamp > pending[index][0]:
+                    boundaries[pending[index][1]] = start
+                    index += 1
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+    return boundaries
 
 
 def extract_message_delta(
@@ -284,9 +348,7 @@ def extract_message_delta(
                 cursor_end = line_end
                 continue
             if event.get("type") == "session_meta":
-                metadata = _session_metadata(
-                    metadata, payload, event.get("timestamp")
-                )
+                metadata = _session_metadata(metadata, payload, event.get("timestamp"))
                 cursor_end = line_end
                 continue
             if event.get("type") == "turn_context":
@@ -389,6 +451,35 @@ def collect_git_evidence(cwd: Path) -> list[dict[str, str]]:
     return evidence
 
 
+def resolve_session_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a transcript-only hook's identity before checkpoint selection."""
+    session_id = event.get("session_id")
+    has_identity = isinstance(session_id, str) and bool(session_id.strip())
+    if has_identity and event.get("cwd"):
+        return event
+    path = event.get("transcript_path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("Hook event has no transcript_path")
+    with Path(path).expanduser().open(encoding="utf-8") as handle:
+        # The header can contain long harness instructions. Parse the complete
+        # record, then retain only the routing whitelist below, never its body.
+        header = json.loads(handle.readline())
+    if not isinstance(header, dict) or header.get("type") != "session_meta":
+        raise ValueError("Transcript has no session metadata header")
+    payload = header.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Transcript has invalid session metadata")
+    header_session_id = payload.get("session_id") or payload.get("id")
+    if not isinstance(header_session_id, str) or not header_session_id.strip():
+        raise ValueError("Transcript has no canonical session identity")
+    metadata = _session_metadata({}, payload, header.get("timestamp"))
+    return {
+        **event,
+        **{key: value for key, value in metadata.items() if not event.get(key)},
+        "session_id": session_id if has_identity else header_session_id,
+    }
+
+
 def build_curation_packet(
     event: dict[str, Any],
     *,
@@ -401,25 +492,21 @@ def build_curation_packet(
     transcript_path = Path(transcript_value).expanduser()
     if not transcript_path.is_file():
         raise FileNotFoundError(f"Transcript not found: {transcript_path}")
+    event = resolve_session_event(event)
 
     cutoff = str(event.get("captured_at") or "") or None
     checkpoint_text = ""
     checkpoint_mode = "baseline"
-    has_more = False
-    valid_checkpoint = (
-        isinstance(checkpoint, dict)
-        and checkpoint.get("session_id")
-        in {event.get("session_id"), None, ""}
-    )
+    valid_checkpoint = isinstance(checkpoint, dict) and checkpoint.get(
+        "session_id"
+    ) in {event.get("session_id"), None, ""}
     if valid_checkpoint:
         from .checkpoints import checkpoint_evidence
 
         checkpoint_text = checkpoint_evidence(
             checkpoint, maximum_chars=checkpoint_max_evidence_chars
         )
-        maximum_delta_chars = max(
-            4_000, MAX_PACKET_CHARS - len(checkpoint_text)
-        )
+        maximum_delta_chars = max(4_000, MAX_PACKET_CHARS - len(checkpoint_text))
         try:
             batch = extract_message_delta(
                 transcript_path,
@@ -427,30 +514,16 @@ def build_curation_packet(
                 maximum_chars=maximum_delta_chars,
                 before_timestamp=cutoff,
             )
-            metadata = batch.metadata
-            messages = batch.messages
-            cursor = batch.cursor
-            has_more = batch.has_more
             checkpoint_mode = "incremental"
         except (OSError, ValueError, TypeError):
-            metadata, messages = extract_messages(
-                transcript_path, before_timestamp=cutoff
-            )
-            cursor = {
-                "transcript_path": str(transcript_path),
-                "byte_offset": _cursor_at_cutoff(transcript_path, cutoff),
-                "after_timestamp": None,
-            }
+            batch = extract_message_tail(transcript_path, before_timestamp=cutoff)
             checkpoint_mode = "recovery"
     else:
-        metadata, messages = extract_messages(
-            transcript_path, before_timestamp=cutoff
-        )
-        cursor = {
-            "transcript_path": str(transcript_path),
-            "byte_offset": _cursor_at_cutoff(transcript_path, cutoff),
-            "after_timestamp": None,
-        }
+        batch = extract_message_tail(transcript_path, before_timestamp=cutoff)
+    metadata = batch.metadata
+    messages = batch.messages
+    cursor = batch.cursor
+    has_more = batch.has_more
     if not messages and not valid_checkpoint:
         raise ValueError("Transcript contains no eligible user/final-answer messages")
     cwd = Path(str(event.get("cwd") or metadata.get("cwd") or Path.home())).expanduser()
@@ -468,14 +541,14 @@ def build_curation_packet(
         )
     evidence.extend(
         [
-        {
-            "id": message.source_id,
-            "kind": "conversation",
-            "role": message.role,
-            "text": message.text,
-            "timestamp": message.timestamp,
-        }
-        for message in messages
+            {
+                "id": message.source_id,
+                "kind": "conversation",
+                "role": message.role,
+                "text": message.text,
+                "timestamp": message.timestamp,
+            }
+            for message in messages
         ]
     )
     for index, item in enumerate(collect_git_evidence(cwd), start=1):

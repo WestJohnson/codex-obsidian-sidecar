@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
@@ -23,11 +24,15 @@ import yaml
 from .config import Settings
 from .coordination import (
     CloudLease,
+    LEASE_PATH,
+    LOCAL_WRITER_PATH,
+    LeaseBusy,
     MachineProcessLock,
     cloud_lease_status,
     local_writer_status,
 )
 from .maintenance import commit_git_backup, inspect_vault
+from .queueing import load_event, save_event
 from .security import contains_secret, redact_text
 from .vault import MANAGED_BY, _atomic_write, parse_frontmatter, vault_permalink
 from .worker import run_maintenance
@@ -45,6 +50,7 @@ REPLICA_IGNORED_PARTS = {".git", ".stversions", ".trash"}
 BACKUP_MANIFEST = "_obsidian-backup-manifest.json"
 SECRET_FILE_NAMES = {".env", "credentials.json", "secrets.json"}
 SECRET_FILE_SUFFIXES = {".key", ".pem", ".p12", ".pfx", ".keystore"}
+PUBLICATION_WAIT_STATUSES = {"no-stage", "stale-stage", "waiting-for-peer"}
 
 
 @dataclass(frozen=True)
@@ -1188,6 +1194,29 @@ def run_cloud_benchmark(
     return result
 
 
+def _check_cloud_contention(before: dict[str, Any]) -> None:
+    sync = before["sync"]
+    if (
+        before["conflicts"]
+        or sync["errors"] != 0
+        or sync["remote_state"] not in {"valid", "unknown", ""}
+        or sync["state"]
+        not in {"idle", "syncing", "scanning", "scan-waiting", "sync-waiting"}
+    ):
+        return
+    for key, path in (("local_writer", LOCAL_WRITER_PATH), ("lease", LEASE_PATH)):
+        if before[key]["active"]:
+            raise LeaseBusy(path, before[key]["reason"])
+
+
+def _stale_stage_result(checked_at: datetime) -> dict[str, Any]:
+    return {
+        "status": "stale-stage",
+        "checked_at": checked_at.isoformat(),
+        "reason": "source or task fingerprints changed; nightly maintenance must recompute",
+    }
+
+
 def _run_offline_cloud_analysis(
     settings: Settings,
     *,
@@ -1195,12 +1224,31 @@ def _run_offline_cloud_analysis(
     agent: CloudAgent | None,
     checked_at: datetime,
     force_agent: bool,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     before = cloud_doctor(settings, client=client)
+    _check_cloud_contention(before)
     if not before["offline_read_safe"]:
         raise RuntimeError(f"offline cloud preflight failed: {json.dumps(before)}")
     if not settings.cloud_backup_dir:
         raise ValueError("cloud_backup_dir is required for cloud maintenance")
+
+    if not maintenance_requested:
+        current_snapshot, _ = source_snapshot(settings.vault_path)
+        _, task_paths = load_cloud_tasks(settings)
+        task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+        if not _staged_report_matches(
+            _load_staged_report(settings), current_snapshot, task_fingerprints
+        ):
+            return _stale_stage_result(checked_at)
+        return {
+            "status": "waiting-for-peer",
+            "checked_at": checked_at.isoformat(),
+            "reason": "matching offline analysis is waiting for peer reconnection",
+        }
+    if on_admitted is not None:
+        on_admitted()
 
     health = inspect_vault(settings, create_layout=False)
     if health.critical_failures:
@@ -1314,10 +1362,13 @@ def _run_connected_cloud_maintenance(
     agent: CloudAgent | None = None,
     now: datetime | None = None,
     force_agent: bool = False,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
     before = cloud_doctor(settings, client=active_client)
+    _check_cloud_contention(before)
     if not before["healthy"]:
         raise RuntimeError(f"cloud preflight failed: {json.dumps(before)}")
     if not settings.cloud_backup_dir:
@@ -1329,10 +1380,9 @@ def _run_connected_cloud_maintenance(
         now=checked_at,
     ):
         active_client.scan()
+        settled = SyncSnapshot(**before["sync"])
         if before["sync"]["peer_connected"]:
             settled = active_client.wait_healthy(settings.cloud_settle_timeout_seconds)
-            if not settled.healthy:
-                raise RuntimeError("cloud lease did not converge to the peer")
 
         # The initial preflight and lease creation are not atomic across Syncthing
         # replicas. Recheck after convergence so a local writer that started in
@@ -1341,10 +1391,33 @@ def _run_connected_cloud_maintenance(
         writer_active, writer_reason, _ = local_writer_status(settings.vault_path)
         if post_lease_conflicts:
             raise RuntimeError("sync conflict appeared during cloud lease convergence")
-        if writer_active:
-            raise RuntimeError(
-                f"local writer appeared during cloud lease convergence: {writer_reason}"
-            )
+        _check_cloud_contention(
+            {
+                "sync": asdict(settled),
+                "conflicts": post_lease_conflicts,
+                "local_writer": {"active": writer_active, "reason": writer_reason},
+                "lease": {"active": False},
+            }
+        )
+        if not settled.healthy:
+            raise RuntimeError("cloud lease did not converge to the peer")
+
+        if not maintenance_requested:
+            current_snapshot, _ = source_snapshot(settings.vault_path)
+            _, task_paths = load_cloud_tasks(settings)
+            task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+            if not _staged_report_matches(
+                _load_staged_report(settings), current_snapshot, task_fingerprints
+            ):
+                return _stale_stage_result(checked_at)
+            if not settings.cloud_agent_enabled:
+                return {
+                    "status": "deferred",
+                    "checked_at": checked_at.isoformat(),
+                    "reason": "cloud agent disabled",
+                }
+        if on_admitted is not None:
+            on_admitted()
 
         backup = create_cloud_backup(
             settings.vault_path,
@@ -1365,6 +1438,12 @@ def _run_connected_cloud_maintenance(
         current_snapshot, excluded_secrets = source_snapshot(settings.vault_path)
         tasks, task_paths = load_cloud_tasks(settings)
         task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+        staged = _load_staged_report(settings)
+        staged_matches = _staged_report_matches(
+            staged, current_snapshot, task_fingerprints
+        )
+        if not maintenance_requested and not staged_matches:
+            return _stale_stage_result(checked_at)
         previous_snapshot = _load_state(settings).get("source_snapshot", {})
         changed_paths = sorted(
             path
@@ -1378,12 +1457,12 @@ def _run_connected_cloud_maintenance(
             "changed_paths": changed_paths,
             "deleted_paths": deleted_paths,
         }
-        staged = _load_staged_report(settings)
-        staged_matches = _staged_report_matches(
-            staged, current_snapshot, task_fingerprints
-        )
         remove_staged = False
-        if settings.cloud_agent_enabled and staged_matches and not force_agent:
+        if (
+            settings.cloud_agent_enabled
+            and staged_matches
+            and (not force_agent or not maintenance_requested)
+        ):
             report = staged["report"]
             dated, latest = write_agent_report(
                 settings,
@@ -1491,6 +1570,54 @@ def _run_connected_cloud_maintenance(
     }
 
 
+def _record_cloud_status(
+    settings: Settings, status: dict[str, Any], *, maintenance_requested: bool = True
+) -> None:
+    status_path = settings.state_dir / "cloud-maintenance-status.json"
+    settings.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (settings.lock_dir / "cloud-status.lock").open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            previous = load_event(status_path)
+        except (OSError, ValueError):
+            previous = {}
+        if status["status"] in PUBLICATION_WAIT_STATUSES:
+            status = {
+                **{key: value for key, value in previous.items() if key != "reason"},
+                **status,
+                "failure": previous.get("failure")
+                or ("error" if previous.get("status") == "error" else None),
+            }
+            if previous.get("maintenance_due") is True:
+                status["status"] = "deferred"
+            else:
+                status.pop("deferred_since", None)
+        if status["status"] == "deferred":
+            status = {
+                **status,
+                "deferred_since": previous.get("deferred_since")
+                or status["checked_at"],
+                "failure": previous.get("failure")
+                or ("error" if previous.get("status") == "error" else None),
+                "maintenance_due": maintenance_requested
+                or previous.get("maintenance_due") is True,
+            }
+        elif status["status"] == "error":
+            status = {
+                **status,
+                "maintenance_due": previous.get("maintenance_due") is True,
+            }
+        save_event(status_path, status)
+
+
+def _cloud_maintenance_due(settings: Settings) -> bool:
+    try:
+        state = load_event(settings.state_dir / "cloud-maintenance-status.json")
+    except (OSError, ValueError):
+        return False
+    return state.get("maintenance_due") is True
+
+
 def run_cloud_maintenance(
     settings: Settings,
     *,
@@ -1498,26 +1625,97 @@ def run_cloud_maintenance(
     agent: CloudAgent | None = None,
     now: datetime | None = None,
     force_agent: bool = False,
+    maintenance_requested: bool = True,
+    retry_pending_maintenance: bool = False,
+    on_admitted: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    checked_at = now or datetime.now(UTC)
+    try:
+        with MachineProcessLock(settings.lock_dir / "cloud-maintenance.lock"):
+            maintenance_allowed = maintenance_requested or (
+                retry_pending_maintenance and _cloud_maintenance_due(settings)
+            )
+            try:
+                result = _run_cloud_maintenance(
+                    settings,
+                    client=client,
+                    agent=agent,
+                    now=checked_at,
+                    force_agent=force_agent,
+                    maintenance_requested=maintenance_allowed,
+                    on_admitted=on_admitted,
+                )
+            except LeaseBusy:
+                raise
+            except Exception as error:
+                _record_cloud_status(
+                    settings,
+                    {
+                        "status": "error",
+                        "checked_at": checked_at.isoformat(),
+                        "error": type(error).__name__,
+                        "failure": type(error).__name__,
+                    },
+                )
+                raise
+            completed = result["status"] == "ok" or (
+                maintenance_allowed
+                and result["status"] in {"offline-staged", "offline-read-only"}
+            )
+            _record_cloud_status(
+                settings,
+                {
+                    "status": "ok" if completed else result["status"],
+                    "checked_at": checked_at.isoformat(),
+                    **({} if completed else {"reason": result.get("reason")}),
+                },
+                maintenance_requested=maintenance_requested,
+            )
+            return result
+    except LeaseBusy as error:
+        result = {
+            "status": "deferred",
+            "reason": error.reason,
+            "checked_at": checked_at.isoformat(),
+        }
+        _record_cloud_status(
+            settings, result, maintenance_requested=maintenance_requested
+        )
+        return result
+
+
+def _run_cloud_maintenance(
+    settings: Settings,
+    *,
+    client: SyncClient | None = None,
+    agent: CloudAgent | None = None,
+    now: datetime | None = None,
+    force_agent: bool = False,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
-    with MachineProcessLock(settings.lock_dir / "cloud-maintenance.lock"):
-        initial = active_client.snapshot()
-        if initial.complete and not initial.peer_connected:
-            return _run_offline_cloud_analysis(
-                settings,
-                client=active_client,
-                agent=agent,
-                checked_at=checked_at,
-                force_agent=force_agent,
-            )
-        return _run_connected_cloud_maintenance(
+    initial = active_client.snapshot()
+    if initial.complete and not initial.peer_connected:
+        return _run_offline_cloud_analysis(
             settings,
             client=active_client,
             agent=agent,
-            now=checked_at,
+            checked_at=checked_at,
             force_agent=force_agent,
+            maintenance_requested=maintenance_requested,
+            on_admitted=on_admitted,
         )
+    return _run_connected_cloud_maintenance(
+        settings,
+        client=active_client,
+        agent=agent,
+        now=checked_at,
+        force_agent=force_agent,
+        maintenance_requested=maintenance_requested,
+        on_admitted=on_admitted,
+    )
 
 
 def run_cloud_reconcile(
@@ -1526,11 +1724,34 @@ def run_cloud_reconcile(
     client: SyncClient | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Publish a fingerprint-equal offline stage shortly after peer reconnection."""
+    """Publish an offline stage or retry previously deferred maintenance."""
+    checked_at = now or datetime.now(UTC)
+    try:
+        # Admission, cooldown inspection, and the final record are one operation.
+        # A contender must not save an older view over the owner's result.
+        with MachineProcessLock(settings.lock_dir / "cloud-reconnect.lock"):
+            return _run_cloud_reconcile(settings, client=client, now=checked_at)
+    except LeaseBusy as error:
+        return {
+            "status": "deferred",
+            "reason": error.reason,
+            "checked_at": checked_at.isoformat(),
+        }
+
+
+def _run_cloud_reconcile(
+    settings: Settings,
+    *,
+    client: SyncClient | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     staged = _load_staged_report(settings)
-    if not staged:
-        return {"status": "no-stage", "checked_at": checked_at.isoformat()}
+    maintenance_due = _cloud_maintenance_due(settings)
+    if not staged and not maintenance_due:
+        result = {"status": "no-stage", "checked_at": checked_at.isoformat()}
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
     state_path = _reconnect_state_path(settings)
     prior: dict[str, Any] = {}
@@ -1561,40 +1782,66 @@ def run_cloud_reconcile(
 
     active_client = client or SyncthingClient.from_settings(settings)
     sync = active_client.snapshot()
-    if not sync.healthy:
-        return {
+    if not sync.healthy and not (maintenance_due and sync.complete):
+        result = {
             "status": "waiting-for-peer",
             "checked_at": checked_at.isoformat(),
             "sync": asdict(sync),
         }
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
     current_snapshot, _ = source_snapshot(settings.vault_path)
     _, task_paths = load_cloud_tasks(settings)
     task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
-    if not _staged_report_matches(staged, current_snapshot, task_fingerprints):
-        return {
-            "status": "stale-stage",
-            "checked_at": checked_at.isoformat(),
-            "reason": "source or task fingerprints changed; nightly maintenance must recompute",
-        }
+    if not maintenance_due and not _staged_report_matches(
+        staged, current_snapshot, task_fingerprints
+    ):
+        result = _stale_stage_result(checked_at)
+        _record_cloud_status(settings, result, maintenance_requested=False)
+        return result
 
-    _atomic_write(
-        state_path,
-        json.dumps(
+    attempt = dict(prior)
+
+    def record_admission() -> None:
+        attempt.update(
+            schema=1,
+            last_attempt_at=checked_at.isoformat(),
+            status="running",
+        )
+        save_event(state_path, attempt)
+
+    try:
+        result = run_cloud_maintenance(
+            settings,
+            client=active_client,
+            now=checked_at,
+            maintenance_requested=False,
+            retry_pending_maintenance=maintenance_due,
+            on_admitted=record_admission,
+        )
+    except Exception:
+        save_event(
+            state_path,
             {
+                **attempt,
                 "schema": 1,
                 "last_attempt_at": checked_at.isoformat(),
-                "status": "publishing",
+                "status": "error",
             },
-            indent=2,
         )
-        + "\n",
-    )
-    result = run_cloud_maintenance(
-        settings,
-        client=active_client,
-        now=checked_at,
-    )
+        raise
+    if result.get("status") != "ok":
+        save_event(
+            state_path,
+            {
+                **attempt,
+                "schema": 1,
+                "checked_at": checked_at.isoformat(),
+                "status": result.get("status", "unknown"),
+            },
+        )
+        return result
     _atomic_write(
         state_path,
         json.dumps(

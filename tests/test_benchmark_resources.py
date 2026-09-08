@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from contextlib import nullcontext
 from pathlib import Path
 from subprocess import CompletedProcess
+from threading import Event, local
+
+import pytest
 
 from obsidian_sidecar import benchmark
 from obsidian_sidecar.benchmark import (
@@ -14,6 +20,7 @@ from obsidian_sidecar.benchmark import (
     _obsidian_cli_search_succeeded,
 )
 from obsidian_sidecar.config import Settings
+from obsidian_sidecar.coordination import CloudLease, LocalWriterLease
 
 
 def test_runtime_benchmark_fixtures_are_package_resources() -> None:
@@ -191,3 +198,188 @@ def test_background_service_health_rejects_never_run_linux_service(
     except AssertionError:
         return
     raise AssertionError("never-run systemd service should fail health check")
+
+
+@pytest.mark.parametrize("lease_class", [LocalWriterLease, CloudLease])
+@pytest.mark.parametrize("failed_case", [None, "critical", "optional"])
+def test_report_publication_defers_without_losing_acceptance_result(
+    settings, monkeypatch, capsys, lease_class, failed_case
+):
+    from obsidian_sidecar import cli
+
+    cases = [benchmark.CaseResult("successful-case", 100, True, True, "verified", 1)]
+    if failed_case:
+        cases.append(
+            benchmark.CaseResult(
+                "failed-case", 0, failed_case == "critical", False, "failed", 1
+            )
+        )
+    result_path = settings.state_dir / "benchmark-results/latest.json"
+    report_path = settings.vault_path / "_System/Health/benchmark-latest.md"
+    with lease_class(settings.vault_path, ttl_seconds=600) as lease:
+        before = lease.path.read_bytes()
+        output = benchmark._finish_benchmark(settings, cases)
+        assert output["report_publication"]["status"] == "deferred"
+        assert output["passed"] is (failed_case is None)
+        assert output["score"] == 100
+        assert json.loads(result_path.read_text()) == output
+        assert result_path.stat().st_mode & 0o777 == 0o600
+        assert not report_path.exists()
+        assert lease.path.read_bytes() == before
+
+    def no_live_cases(_settings):
+        pytest.fail("Report retry must not rerun benchmark cases")
+
+    monkeypatch.setattr(cli, "load_settings", lambda _: settings)
+    monkeypatch.setattr(benchmark, "run_benchmark", no_live_cases)
+    assert cli.main(["benchmark", "--publish-only"]) == (
+        0 if failed_case is None else 1
+    )
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["report_publication"]["status"] == "published"
+    assert recovered["cases"] == output["cases"]
+    assert recovered["ran_at"] == output["ran_at"]
+    assert recovered["passed"] == output["passed"]
+    assert (
+        "**Result:** PASS" if failed_case is None else "**Result:** FAIL"
+    ) in report_path.read_text()
+
+
+@pytest.mark.parametrize("publication_contended", [False, True])
+def test_overlapping_benchmarks_keep_their_own_results_and_exit_codes(
+    settings, monkeypatch, capsys, publication_contended
+):
+    from obsidian_sidecar import cli
+    from obsidian_sidecar.queueing import load_event
+
+    result_path = settings.state_dir / "benchmark-results/latest.json"
+    report_path = settings.vault_path / "_System/Health/benchmark-latest.md"
+    cases = {
+        "failed": [benchmark.CaseResult("failed-A", 100, True, False, "failed", 1)],
+        "passed": [benchmark.CaseResult("passed-B", 100, True, True, "verified", 1)],
+    }
+    role = local()
+    saved_failure, release_failure, second_cases_done = Event(), Event(), Event()
+    outputs = {}
+    save = benchmark.save_event
+
+    def pause_failed_save(path, output):
+        save(path, output)
+        if (
+            path == result_path
+            and role.name == "failed"
+            and not saved_failure.is_set()
+        ):
+            saved_failure.set()
+            assert release_failure.wait(5)
+
+    def finish_cases(active_settings):
+        if role.name == "passed":
+            second_cases_done.set()
+        output = benchmark._finish_benchmark(active_settings, cases[role.name])
+        outputs[role.name] = output
+        return output
+
+    def run(name):
+        role.name = name
+        return cli.main(["benchmark"])
+
+    monkeypatch.setattr(cli, "load_settings", lambda _: settings)
+    monkeypatch.setattr(benchmark, "save_event", pause_failed_save)
+    monkeypatch.setattr(benchmark, "run_benchmark", finish_cases)
+    lease = (
+        CloudLease(settings.vault_path, ttl_seconds=600)
+        if publication_contended
+        else nullcontext()
+    )
+    with lease, ThreadPoolExecutor(max_workers=2) as pool:
+        failed = pool.submit(run, "failed")
+        try:
+            assert saved_failure.wait(5)
+            passed = pool.submit(run, "passed")
+            assert second_cases_done.wait(5)
+            with pytest.raises(FutureTimeout):
+                passed.result(timeout=0.1)
+            assert load_event(result_path)["passed"] is False
+        finally:
+            release_failure.set()
+        assert failed.result(timeout=5) == 1
+        assert passed.result(timeout=5) == 0
+    assert outputs["failed"]["passed"] is False
+    assert outputs["failed"]["score"] == 0
+    assert outputs["failed"]["critical_failures"] == ["failed-A"]
+    assert outputs["failed"]["cases"][0]["name"] == "failed-A"
+    assert outputs["passed"]["passed"] is True
+    assert outputs["passed"]["score"] == 100
+    assert outputs["passed"]["cases"][0]["name"] == "passed-B"
+    assert load_event(result_path) == outputs["passed"]
+    expected_publication = "deferred" if publication_contended else "published"
+    for output in outputs.values():
+        assert output["report_publication"]["status"] == expected_publication
+    assert result_path.stat().st_mode & 0o777 == 0o600
+    if publication_contended:
+        assert not report_path.exists()
+    else:
+        assert "`passed-B`" in report_path.read_text()
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("new_passed", [False, True])
+def test_publish_only_cannot_overwrite_newer_acceptance_result(
+    settings, monkeypatch, capsys, new_passed
+):
+    from obsidian_sidecar import cli
+    from obsidian_sidecar.queueing import load_event
+
+    result_path = settings.state_dir / "benchmark-results/latest.json"
+    report_path = settings.vault_path / "_System/Health/benchmark-latest.md"
+    old_cases = [
+        benchmark.CaseResult("old-A", 100, True, not new_passed, "original", 1)
+    ]
+    new_cases = [
+        benchmark.CaseResult("new-B", 100, True, new_passed, "new result", 2)
+    ]
+    with CloudLease(settings.vault_path, ttl_seconds=600):
+        original = benchmark._finish_benchmark(settings, old_cases)
+    assert original["report_publication"]["status"] == "deferred"
+    publishing, release_publication, new_cases_done = Event(), Event(), Event()
+    write = benchmark._atomic_write
+
+    def pause_publication(path, content):
+        if path == report_path and not publishing.is_set():
+            publishing.set()
+            assert release_publication.wait(5)
+        write(path, content)
+
+    def finish_new_cases():
+        new_cases_done.set()
+        return benchmark._finish_benchmark(settings, new_cases)
+
+    def forbidden(_settings):
+        pytest.fail("publish-only must not rerun benchmark cases")
+
+    monkeypatch.setattr(cli, "load_settings", lambda _: settings)
+    monkeypatch.setattr(benchmark, "run_benchmark", forbidden)
+    monkeypatch.setattr(benchmark, "_atomic_write", pause_publication)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        publication = pool.submit(cli.main, ["benchmark", "--publish-only"])
+        try:
+            assert publishing.wait(5)
+            newer = pool.submit(finish_new_cases)
+            assert new_cases_done.wait(5)
+            with pytest.raises(FutureTimeout):
+                newer.result(timeout=0.1)
+            assert load_event(result_path) == original
+        finally:
+            release_publication.set()
+        assert publication.result(timeout=5) == (0 if original["passed"] else 1)
+        latest = newer.result(timeout=5)
+    published = json.loads(capsys.readouterr().out)
+    assert published == {**original, "report_publication": {"status": "published"}}
+    assert latest["passed"] is new_passed
+    assert latest["score"] == (100 if new_passed else 0)
+    assert latest["cases"][0]["name"] == "new-B"
+    assert latest["report_publication"]["status"] == "published"
+    assert load_event(result_path) == latest
+    assert "`new-B`" in report_path.read_text()
+    assert "`old-A`" not in report_path.read_text()

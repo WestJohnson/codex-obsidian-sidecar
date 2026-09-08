@@ -26,6 +26,10 @@ AGENT_FILES = (
     Path("docs/INSTALL.md"),
     Path("docs/KNOWLEDGE_STATE.md"),
     Path("docs/UPDATES.md"),
+    Path("docs/RUNTIME_RELIABILITY.md"),
+    Path("docs/TESTING.md"),
+    Path("docs/OPERATIONS.md"),
+    Path("docs/CLOUD_SYNC.md"),
 )
 SECRET_PATTERNS = (
     re.compile(rb"sk-(?:api-|or-v1-)?[A-Za-z0-9_-]{32,}"),
