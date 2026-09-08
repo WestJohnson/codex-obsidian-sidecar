@@ -343,7 +343,7 @@ def test_concurrent_cloud_deferral_cannot_erase_a_newer_failure(
     ],
 )
 def test_final_convergence_classifies_contention_before_failure_retries(
-    settings, tmp_path, condition, monkeypatch
+    settings, tmp_path, condition, monkeypatch, record_runtime_evidence
 ):
     from obsidian_sidecar import cloud
     from obsidian_sidecar.queueing import load_event, save_event
@@ -374,13 +374,14 @@ def test_final_convergence_classifies_contention_before_failure_retries(
 
     client = RacingSync()
     if deferred:
-        assert (
-            run_cloud_maintenance(configured, client=client, agent=agent)["status"]
-            == "deferred"
+        maintenance_result = run_cloud_maintenance(
+            configured, client=client, agent=agent
         )
+        assert maintenance_result["status"] == "deferred"
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as maintenance_error:
             run_cloud_maintenance(configured, client=client, agent=agent)
+        maintenance_result = {"error_type": type(maintenance_error.value).__name__}
     state_path = configured.state_dir / "cloud-maintenance-status.json"
     state = load_event(state_path)
     assert state["maintenance_due"] is deferred
@@ -394,10 +395,12 @@ def test_final_convergence_classifies_contention_before_failure_retries(
         save_event(state_path, {**state, "maintenance_due": True})
 
     if deferred:
-        assert run_cloud_reconcile(configured, client=client)["status"] == "deferred"
+        reconcile_result = run_cloud_reconcile(configured, client=client)
+        assert reconcile_result["status"] == "deferred"
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises(RuntimeError) as reconcile_error:
             run_cloud_reconcile(configured, client=client)
+        reconcile_result = {"error_type": type(reconcile_error.value).__name__}
     reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
     assert bool(reconnect.get("last_attempt_at")) is (not deferred)
     assert client.waits == 2
@@ -406,11 +409,27 @@ def test_final_convergence_classifies_contention_before_failure_retries(
     assert not (
         configured.vault_path / "_System/Coordination/cloud-maintenance.json"
     ).exists()
+    record_runtime_evidence(
+        f"cloud-convergence-{condition}",
+        {
+            "scope": (
+                "Synthetic Syncthing race with real lease, maintenance "
+                "and retry state."
+            ),
+            "condition": condition,
+            "maintenance_result": maintenance_result,
+            "maintenance_state": state,
+            "reconcile_result": reconcile_result,
+            "reconnect_state": reconnect,
+            "agent_calls": agent.calls,
+            "backups": list(configured.cloud_backup_dir.glob("*.tar.gz")),
+        },
+    )
 
 
 @pytest.mark.parametrize("connected", [True, False])
 def test_deferred_nightly_without_stage_retries_from_reconciler(
-    settings, tmp_path, monkeypatch, connected
+    settings, tmp_path, monkeypatch, connected, record_runtime_evidence
 ):
     from obsidian_sidecar import cloud
     from obsidian_sidecar.queueing import load_event
@@ -423,11 +442,17 @@ def test_deferred_nightly_without_stage_retries_from_reconciler(
     )
     sync = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", connected))
     with LocalWriterLease(configured.vault_path, ttl_seconds=600):
-        assert run_cloud_maintenance(configured, client=sync)["status"] == "deferred"
-        assert run_cloud_reconcile(configured, client=sync)["status"] == "deferred"
+        deferred = run_cloud_maintenance(configured, client=sync)
+        assert deferred["status"] == "deferred"
+        deferred_retry = run_cloud_reconcile(configured, client=sync)
+        assert deferred_retry["status"] == "deferred"
         assert not (configured.state_dir / "cloud-staged-report.json").exists()
         state = load_event(configured.state_dir / "cloud-reconnect-state.json")
         assert "last_attempt_at" not in state
+        deferred_state = load_event(
+            configured.state_dir / "cloud-maintenance-status.json"
+        )
+        deferred_reconnect = state
     assert agent.calls == 0
     recovered = run_cloud_reconcile(configured, client=sync)
     assert recovered["status"] == ("published" if connected else "offline-staged")
@@ -435,8 +460,34 @@ def test_deferred_nightly_without_stage_retries_from_reconciler(
     assert list(configured.cloud_backup_dir.glob("*.tar.gz"))
     state = load_event(configured.state_dir / "cloud-maintenance-status.json")
     assert not state.get("maintenance_due")
-    run_cloud_reconcile(configured, client=sync)
+    unchanged = run_cloud_reconcile(configured, client=sync)
     assert agent.calls == 1
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    assert stage_path.exists() is (not connected)
+    record_runtime_evidence(
+        f"cloud-nightly-connected-{connected}",
+        {
+            "scope": (
+                "Synthetic Syncthing and deterministic cloud agent; "
+                "real report and backup writes."
+            ),
+            "connected": connected,
+            "deferred_maintenance": deferred,
+            "deferred_reconcile": deferred_retry,
+            "deferred_state": deferred_state,
+            "deferred_reconnect": deferred_reconnect,
+            "recovered_result": recovered,
+            "completed_state": state,
+            "published_reports": {
+                str(path.relative_to(configured.vault_path)): path.read_text()
+                for path in configured.vault_path.glob("_System/Cloud Reports/*.md")
+            },
+            "staged_report": load_event(stage_path) if stage_path.exists() else None,
+            "unchanged_retry": unchanged,
+            "total_agent_calls": agent.calls,
+            "backups": list(configured.cloud_backup_dir.glob("*.tar.gz")),
+        },
+    )
 
 
 def test_sync_snapshot_distinguishes_complete_offline_replica_from_healthy_sync() -> (

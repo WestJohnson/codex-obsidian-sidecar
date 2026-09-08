@@ -32,8 +32,8 @@
 9. If the Mac is disconnected, the VPS creates a validated backup and stages
    any Luna result outside the vault. It publishes only after reconnection and
    an exact source/task fingerprint match.
-10. A five-minute reconnect timer notices a returned peer and publishes a
-    matching stage within the configured ten-minute rate limit.
+10. The reconnect timer retries pending cloud work under the
+    [staging and retry rules](CLOUD_SYNC.md#when-the-mac-is-offline).
 11. The local worker attempts a deduplicated desktop notification for failed
     curation events, Syncthing conflicts, persistent cloud failure markers,
     a staged report left unpublished for more than 24 hours, or the capture,
@@ -67,8 +67,9 @@ of blocking capture.
 Queue groups share both a session ID and resolved transcript path. The latest
 arrival controls debounce; the latest valid capture timestamp controls the
 evidence cutoff, even if an older capture arrives later during recovery.
-Events are marked processed only when the committed cursor covers their own
-capture boundary. A Stop without a turn ID retains its distinct capture timestamp.
+A Stop without a turn ID retains its distinct capture timestamp. For completion
+and incomplete-tail handling, see the
+[capture retirement contract](RUNTIME_RELIABILITY.md#incomplete-captures).
 
 If a curator still echoes too many retained items, the worker automatically
 discards only the oldest `c1`-only carry-forward entries until the output fits
@@ -220,13 +221,8 @@ validated and written. To isolate checkpoint behavior while investigating,
 set `"checkpoint_enabled": false`, reload the worker, and keep the existing
 checkpoint directory intact for rollback or inspection.
 
-Cloud maintenance retries a failed run after 15 minutes, with at most three
-starts per hour. A maintenance failure creates
-`/var/lib/obsidian-cloud/maintenance.failed`; the next successful maintenance
-run clears it and resets the retry counter. Reconnect failures use the separate
-`/var/lib/obsidian-cloud/reconnect.failed` marker, which is cleared by the next
-successful reconnect check. Inspect the corresponding service journal before
-removing or overriding a persistent marker.
+For cloud service retries, failure markers, and their distinction from
+maintenance completion, follow [Cloud Sync routine checks](CLOUD_SYNC.md#routine-checks).
 
 ## Updating The Runtime
 

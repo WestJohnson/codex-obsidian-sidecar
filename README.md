@@ -76,7 +76,7 @@ use `$obsidian-sidecar-setup`. See [Installation](docs/INSTALL.md).
   use mode-0600 atomic JSON, and fall back safely when missing, stale, or
   corrupt.
 - Low-confidence output goes to `00 Inbox/Needs Review`.
-- Invalid output goes to `_System/Quarantine` and retries at most three times.
+- Invalid output follows the [quarantine and retry procedure](docs/OPERATIONS.md#recovery).
 - The curator subprocess runs ephemerally, read-only, without user rules,
   hooks, or network-dependent tools.
 - Same-host runs use an OS lock; cross-device writers use synchronized leases.
@@ -99,7 +99,7 @@ obsidian-sidecar update-check       # read-only release check
 obsidian-sidecar update --yes       # exact-version update with rollback
 obsidian-sidecar cloud-doctor       # optional sync and lease health
 obsidian-sidecar cloud-benchmark    # optional deployed cloud score
-obsidian-sidecar cloud-reconcile    # publish a matching offline stage
+obsidian-sidecar cloud-reconcile    # retry pending cloud work
 obsidian-sidecar alert-status       # actionable alert conditions only
 obsidian-sidecar freshness-status   # computed freshness; no note mutation
 obsidian-sidecar decision-impact ID # read-only decision blast radius

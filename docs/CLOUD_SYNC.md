@@ -97,7 +97,7 @@ creates a visible `sync-conflict` copy and the next cloud run stops.
 The timer runs at 13:30 UTC, which is 03:30 HST, with up to ten minutes of
 random delay. It is persistent, so a missed run starts after the VPS comes back.
 
-Each run:
+Each connected run:
 
 1. Requires connected, complete replicas, no conflicts, and no active writer.
 2. Acquires and synchronizes the cloud-maintenance lease.
@@ -187,22 +187,28 @@ SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
 SIDECAR_CLOUD_HOST="$(jq -r .cloud_status_ssh_host "$SIDECAR_CONFIG_PATH")"
 ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-doctor'
 ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json cloud-benchmark'
+ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/bin/obsidian-sidecar --config /etc/obsidian-cloud/config.json alert-status'
 ssh "$SIDECAR_CLOUD_HOST" 'systemctl list-timers obsidian-cloud-maintenance.timer --no-pager'
 ssh "$SIDECAR_CLOUD_HOST" 'systemctl list-timers obsidian-cloud-reconnect.timer --no-pager'
 ssh "$SIDECAR_CLOUD_HOST" 'journalctl -u obsidian-cloud-maintenance.service -n 100 --no-pager'
 ```
 
-`cloud-benchmark` is scored out of 100. Passing requires at least 80 points and
-every critical gate; record each deployment's live result instead of treating a
-historical score in this runbook as current evidence.
+Require the [cloud acceptance score](TESTING.md#cloud-acceptance-score) and no
+active problems in `alert-status`. Record each deployment's live result instead
+of treating a historical score in this runbook as current evidence.
 
 When a peer is disconnected, `cloud-doctor` intentionally exits nonzero and
 reports `offline_read_safe: true` only when the local replica is complete and
 conflict-free. That state permits staged analysis, not synced-vault mutation.
-Failed service runs retry after 15 minutes, up to three starts per hour, and
-leave `/var/lib/obsidian-cloud/maintenance.failed` until successful completion.
-The success handler removes the marker and resets the retry counter so
-operator-triggered healthy runs do not exhaust the failure budget.
+Failed nightly maintenance service runs retry after 15 minutes, up to three
+starts per hour. Maintenance and reconnect failures set independent
+`maintenance.failed` and `reconnect.failed` markers under `/var/lib/obsidian-cloud`.
+Each service's `OnSuccess` handler removes only its own marker and resets its
+retry counter. Contention deferrals also exit zero and trigger that handler;
+an absent marker does not prove maintenance completed. Inspect the command's
+JSON result and `alert-status` using the
+[persistent runtime status contract](RUNTIME_RELIABILITY.md#health-and-alerts).
+Inspect the corresponding service journal before removing or overriding a marker.
 
 The local worker probes `alert-status` over the configured
 `cloud_status_ssh_host` at most once every 15 minutes. A failed probe is
@@ -265,7 +271,7 @@ rsync -az --exclude .git --exclude .venv --exclude .pytest_cache --exclude .ruff
 ssh "$SIDECAR_CLOUD_HOST" 'install -d -o root -g root -m 0755 /opt/obsidian-cloud/releases'
 rsync -az "release/artifacts/codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl" "$SIDECAR_CLOUD_HOST":/opt/obsidian-cloud/releases/
 ssh "$SIDECAR_CLOUD_HOST" "/opt/obsidian-cloud/venv/bin/pip install --force-reinstall --no-deps /opt/obsidian-cloud/releases/codex_obsidian_sidecar-${SIDECAR_VERSION}-py3-none-any.whl"
-ssh "$SIDECAR_CLOUD_HOST" 'cd /opt/obsidian-cloud/app && /opt/obsidian-cloud/venv/bin/pytest -q'
+ssh "$SIDECAR_CLOUD_HOST" '/opt/obsidian-cloud/venv/bin/obsidian-sidecar --version'
 ```
 
 After a runtime or systemd change, run one manual maintenance cycle followed by
@@ -274,11 +280,6 @@ timestamped archive before deployment, and keep the exact prior wheel under
 `/opt/obsidian-cloud/releases` as the rollback input. Syncthing itself is
 installed from Homebrew on the Mac and the official Syncthing stable-v2 apt
 repository on Ubuntu.
-
-Maintenance and reconnect failures have independent markers under
-`/var/lib/obsidian-cloud`. Each marker is cleared only by a successful run of
-the service that owns it, preventing a recovered reconnect from hiding a real
-nightly maintenance failure.
 
 ## Primary References
 

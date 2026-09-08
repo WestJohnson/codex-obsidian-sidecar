@@ -15,8 +15,7 @@ require root, a public server, or an API key for local operation.
 - `notify-send` when Linux desktop notifications are desired (see
   [Operations](OPERATIONS.md#runtime-topology)).
 
-Windows can run the package and worker manually, but the production installer
-does not create a Windows scheduler task.
+Native Windows is unsupported: the runtime requires Unix `fcntl` process locks.
 
 ## Agent-Driven Installation
 

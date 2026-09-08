@@ -11,7 +11,7 @@
   but mixed-version long-running workers must not overlap the installation.
 - Syncthing is eventually consistent. Shared files provide cooperative fencing,
   not a linearizable distributed mutex. Do not break live leases, force
-    simultaneous writers on offline replicas, or claim this change guarantees
+  simultaneous writers on offline replicas, or claim this change guarantees
   distributed mutual exclusion. Cloud maintenance retains its sync-settle checks.
 - Daily local maintenance is scheduled from `maintenance-success.json`, not
   the frequently refreshed health observation. Failed or deferred work stays
@@ -48,8 +48,9 @@ preserve the original capture time and audit record before retrying. Do not
 substitute the newest transcript or mark a queued recovery as completed
 curation. Normal retry handling is in [Operations](OPERATIONS.md#recovery).
 
-Capture retirement requires a complete transcript cutoff covered by a validated
-checkpoint. Baseline and recovery packets derive evidence, cursor, and incomplete
+Capture retirement requires a complete transcript cutoff covered by the committed
+checkpoint, or by the validated packet cursor when checkpoints are disabled.
+Baseline and recovery packets derive evidence, cursor, and incomplete
 tail status from the same read, retaining the existing last-16-message and
 character limits. An unfinished JSONL tail remains queued until the complete
 record is covered, including when it finishes while a packet is being built.
@@ -83,8 +84,9 @@ A prior cloud failure remains visible through subsequent deferrals until a
 successful connected or offline-staged run clears it. A concurrent contention
 observer cannot overwrite a newer failure: status updates are serialized, and
 operation results are recorded before releasing the process lock. Cloud
-maintenance does not use the local worker's silence threshold because it runs on a different
-schedule. Cloud-only deployments do not require a local-worker heartbeat.
+maintenance does not use the local worker's silence threshold because it runs
+on a different schedule. Cloud-only deployments do not require a local-worker
+heartbeat.
 
 ## Search Indexing
 

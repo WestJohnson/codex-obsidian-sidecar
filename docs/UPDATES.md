@@ -14,10 +14,16 @@ verified release directory, following the
 [candidate upgrade and rollback procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback):
 
 ```sh
-cd release
+# Run from the full release directory.
 shasum -a 256 -c SHA256SUMS
 uv tool install --force ./artifacts/codex_obsidian_sidecar-VERSION-py3-none-any.whl
 ```
+
+For an offline agent bundle, verify its ZIP against the release's `SHA256SUMS`
+before extraction. Run the same wheel-install command from the extracted bundle
+root. The checksum file is distributed alongside the release artifacts, not
+inside the bundle. Source tests and build scripts require the matching source
+distribution or checkout; the agent bundle contains the wheel and operator guides.
 
 An update is never applied automatically. After reviewing the current and
 target versions:

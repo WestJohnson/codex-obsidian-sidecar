@@ -47,15 +47,12 @@ target versions, then run `obsidian-sidecar update --yes` only after approval.
 The updater installs an exact package version from HTTPS and rolls back if the
 new executable fails version verification.
 
-For an offline release bundle, verify `SHA256SUMS` first and install the exact
-wheel from that bundle. Re-run `verify-install`, `doctor`, and the deterministic
-test procedure from the install contract after every update.
+For offline installation and post-update verification, follow
+[Updates](../../../docs/UPDATES.md#user-flow) and the
+[candidate upgrade procedure](../../../docs/RUNTIME_RELIABILITY.md#upgrade-and-rollback).
 
-For version 0.4.0 or later, inspect `obsidian-sidecar knowledge-migrate` after
-installation. The command is read-only by default. Obtain explicit approval
-before adding `--apply`; apply only on the authoritative local vault, then
-verify `freshness-status`, one representative `decision-impact`, Basic Memory
-reindexing, and `doctor` before upgrading a cloud replica.
+For a separately requested vault migration, follow
+[Existing Vault Migration](../../../docs/KNOWLEDGE_STATE.md#existing-vault-migration).
 
 ## Recovery
 

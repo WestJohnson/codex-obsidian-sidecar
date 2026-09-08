@@ -771,7 +771,13 @@ def test_incomplete_tail_cannot_retire_capture(settings, transcript_path):
     [("baseline", True), ("recovery", True), ("baseline", False)],
 )
 def test_completed_tail_between_reads_is_never_retired_unseen(
-    settings, transcript_path, valid_curation, monkeypatch, mode, checkpoint_enabled
+    settings,
+    transcript_path,
+    valid_curation,
+    monkeypatch,
+    mode,
+    checkpoint_enabled,
+    record_runtime_evidence,
 ):
     from obsidian_sidecar import worker
     from obsidian_sidecar.checkpoints import checkpoint_path, load_checkpoint
@@ -875,6 +881,7 @@ def test_completed_tail_between_reads_is_never_retired_unseen(
     assert packets[0]["checkpoint"]["has_more"] is True
     assert packets[0]["checkpoint"]["cursor"]["byte_offset"] == len(content)
     assert tail_text not in [item["text"] for item in packets[0]["evidence"]]
+    retained_event = load_event(event)
     if checkpoint_enabled:
         assert load_checkpoint(settings, session)["cursor"]["byte_offset"] == len(
             content
@@ -886,6 +893,21 @@ def test_completed_tail_between_reads_is_never_retired_unseen(
     assert not event.exists()
     assert tail_text in [item["text"] for item in packets[1]["evidence"]]
     assert packets[1]["checkpoint"]["cursor"]["byte_offset"] == len(content + tail)
+    record_runtime_evidence(
+        f"capture-tail-{mode}-checkpoint-{checkpoint_enabled}",
+        {
+            "scope": (
+                "Synthetic transcript completed during packet read; "
+                "deterministic curation."
+            ),
+            "first_process": first.__dict__,
+            "retained_event": retained_event,
+            "first_packet": packets[0],
+            "second_process": second.__dict__,
+            "second_packet": packets[1],
+            "remaining_queue": list(settings.queue_dir.glob("*.json")),
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -981,7 +1003,7 @@ def test_idle_tick_recovers_indexing_after_queue_retirement_crash(
 
 
 def test_transcript_only_capture_uses_canonical_checkpoint(
-    settings, transcript_path, valid_curation, monkeypatch
+    settings, transcript_path, valid_curation, monkeypatch, record_runtime_evidence
 ):
     from obsidian_sidecar.checkpoints import load_checkpoint
     from obsidian_sidecar.transcript import build_curation_packet
@@ -1003,9 +1025,24 @@ def test_transcript_only_capture_uses_canonical_checkpoint(
     assert packet["session_id"] == "fixture-session-001"
     assert packet["checkpoint"]["mode"] == "incremental"
     assert process_ready(settings).groups_seen == 0
+    record_runtime_evidence(
+        "canonical-session",
+        {
+            "scope": (
+                "Transcript-only capture with deterministic curation and indexing."
+            ),
+            "input_event": event,
+            "process": first.__dict__,
+            "persisted_checkpoint": checkpoint,
+            "next_packet": packet,
+            "remaining_queue": list(settings.queue_dir.glob("*.json")),
+        },
+    )
 
 
-def test_index_refresh_cannot_postpone_daily_maintenance(settings, monkeypatch):
+def test_index_refresh_cannot_postpone_daily_maintenance(
+    settings, monkeypatch, record_runtime_evidence
+):
     from obsidian_sidecar import worker
 
     calls = []
@@ -1033,12 +1070,29 @@ def test_index_refresh_cannot_postpone_daily_maintenance(settings, monkeypatch):
         }
 
     monkeypatch.setattr(worker, "_run_maintenance", maintain)
-    assert daemon_once(settings)["maintenance"] is not None
+    first = daemon_once(settings)
+    assert first["maintenance"] is not None
     # More successful capture/index observations refresh health, not the daily clock.
     clock = (settings.state_dir / "maintenance-success.json").read_bytes()
-    assert daemon_once(settings)["maintenance"] is None
+    second = daemon_once(settings)
+    assert second["maintenance"] is None
     assert len(calls) == 1
     assert (settings.state_dir / "maintenance-success.json").read_bytes() == clock
+    record_runtime_evidence(
+        "maintenance-clock",
+        {
+            "scope": (
+                "Real timer scheduling with synthetic successful indexing "
+                "and maintenance."
+            ),
+            "previous_completion": stale.isoformat(),
+            "first_tick": first,
+            "second_tick": second,
+            "successful_maintenance_clock": json.loads(clock),
+            "health_observation": load_event(settings.state_dir / "health.json"),
+            "maintenance_calls": len(calls),
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -1067,7 +1121,7 @@ def test_incomplete_maintenance_stays_due(settings, monkeypatch, result):
 
 
 def test_active_index_owner_does_not_raise_failure_alert(
-    settings, transcript_path, monkeypatch
+    settings, transcript_path, monkeypatch, record_runtime_evidence
 ):
     from obsidian_sidecar import maintenance
 
@@ -1095,6 +1149,7 @@ def test_active_index_owner_does_not_raise_failure_alert(
             == "deferred"
         )
         assert alert_status(settings)["healthy"]
+        active_alerts = alert_status(settings)
 
     def dead_owner(*_args):
         raise ProcessLookupError()
@@ -1102,9 +1157,18 @@ def test_active_index_owner_does_not_raise_failure_alert(
     monkeypatch.setattr(maintenance.os, "kill", dead_owner)
     assert maintenance.indexing_problem(settings) == "basic-memory-index-error"
     assert not alert_status(settings)["healthy"]
+    record_runtime_evidence(
+        "index-owner",
+        {
+            "scope": "Live test-process owner followed by simulated missing owner.",
+            "index_state": load_event(settings.state_dir / "index-status.json"),
+            "active_owner_alert_status": active_alerts,
+            "missing_owner_alert_status": alert_status(settings),
+        },
+    )
 
 
-def test_abandoned_index_state_is_actionable(settings):
+def test_abandoned_index_state_is_actionable(settings, record_runtime_evidence):
     from obsidian_sidecar.maintenance import indexing_problem
 
     save_event(
@@ -1116,6 +1180,16 @@ def test_abandoned_index_state_is_actionable(settings):
         },
     )
     assert indexing_problem(settings) == "basic-memory-index-error"
+    alerts = alert_status(settings)
+    assert not alerts["healthy"]
+    record_runtime_evidence(
+        "index-abandoned",
+        {
+            "scope": "Index operation older than ten minutes with a live local owner.",
+            "index_state": load_event(settings.state_dir / "index-status.json"),
+            "alert_status": alerts,
+        },
+    )
 
 
 @pytest.mark.parametrize("success", ["ok", "clean"])

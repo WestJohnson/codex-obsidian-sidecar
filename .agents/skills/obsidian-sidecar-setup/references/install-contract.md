@@ -16,12 +16,8 @@ workflow and is disabled by default.
 For the self-hosted release channel, follow the authoritative
 [direct-installation procedure](../../../../docs/INSTALL.md#direct-installation).
 
-From an offline export:
-
-```sh
-shasum -a 256 -c SHA256SUMS
-uv tool install --force ./codex_obsidian_sidecar-VERSION-py3-none-any.whl
-```
+For an offline export or agent bundle, follow
+[Updates](../../../../docs/UPDATES.md#user-flow).
 
 Do not use `pip` against the system Python and do not use `sudo`.
 
@@ -89,18 +85,15 @@ obsidian-sidecar benchmark
 the [platform live checks](../../../../docs/TESTING.md#live-suite). Hook trust
 remains a deliberate human action in a fresh Codex session.
 
-For an existing managed vault upgrading to 0.4.0 or later, run the read-only
-`knowledge-migrate` plan, review its project and decision counts, and apply only
-with explicit approval on the authoritative local replica. A repeated apply
-must report no changed project, decision, or runbook records. Confirm computed
-freshness and a representative read-only decision impact before completion.
+For a separately requested vault migration, follow
+[Existing Vault Migration](../../../../docs/KNOWLEDGE_STATE.md#existing-vault-migration).
 
 ## Platform Boundary
 
 - macOS: launchd integration is supported.
 - Linux: user-level systemd integration is supported when a user bus exists.
-- Windows: install the package only and use a manually reviewed scheduler; the
-  setup command rejects automatic service installation.
+
+For platform limitations, see [Installation requirements](../../../../docs/INSTALL.md#requirements).
 
 ## Updates
 

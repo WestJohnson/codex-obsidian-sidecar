@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,25 @@ from obsidian_sidecar.config import Settings
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def record_runtime_evidence(tmp_path: Path):
+    """Export synthetic API results and persisted runtime contracts on request."""
+
+    def record(name: str, value: dict) -> None:
+        directory = os.environ.get("SIDECAR_TEST_EVIDENCE_DIR")
+        if not directory:
+            return
+        output = Path(directory)
+        output.mkdir(parents=True, exist_ok=True)
+        content = json.dumps(value, indent=2, default=str)
+        (output / f"{name}.json").write_text(
+            content.replace(str(tmp_path), "<TEST_ROOT>") + "\n",
+            encoding="utf-8",
+        )
+
+    return record
 
 
 @pytest.fixture

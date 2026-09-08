@@ -158,7 +158,8 @@ First inspect the plan:
 obsidian-sidecar knowledge-migrate
 ```
 
-Then apply on the authoritative local replica:
+Migration is separate from a package update. Review the plan and obtain explicit
+approval before applying it on the authoritative local replica:
 
 ```sh
 obsidian-sidecar knowledge-migrate --apply
@@ -173,6 +174,10 @@ inferred edges, annotates managed runbooks, refreshes project decision indexes,
 and adds current-state/open-work rollups to project hubs. It does not alter
 session bodies, silently merge decision records, or automatically merge
 duplicate project identities.
+
+A repeated apply must report no changed project, decision, or runbook records.
+Confirm `freshness-status`, a representative read-only `decision-impact`, Basic
+Memory indexing, and `doctor` after applying the plan.
 
 ## Project Hubs And Model Provenance
 
