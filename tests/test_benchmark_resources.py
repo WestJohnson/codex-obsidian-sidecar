@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from subprocess import CompletedProcess
+
+import pytest
 
 from obsidian_sidecar import benchmark
 from obsidian_sidecar.benchmark import (
@@ -14,6 +17,7 @@ from obsidian_sidecar.benchmark import (
     _obsidian_cli_search_succeeded,
 )
 from obsidian_sidecar.config import Settings
+from obsidian_sidecar.coordination import CloudLease, LocalWriterLease
 
 
 def test_runtime_benchmark_fixtures_are_package_resources() -> None:
@@ -191,3 +195,48 @@ def test_background_service_health_rejects_never_run_linux_service(
     except AssertionError:
         return
     raise AssertionError("never-run systemd service should fail health check")
+
+
+@pytest.mark.parametrize("lease_class", [LocalWriterLease, CloudLease])
+@pytest.mark.parametrize("failed_case", [None, "critical", "optional"])
+def test_report_publication_defers_without_losing_acceptance_result(
+    settings, monkeypatch, capsys, lease_class, failed_case
+):
+    from obsidian_sidecar import cli
+
+    cases = [benchmark.CaseResult("successful-case", 100, True, True, "verified", 1)]
+    if failed_case:
+        cases.append(
+            benchmark.CaseResult(
+                "failed-case", 0, failed_case == "critical", False, "failed", 1
+            )
+        )
+    result_path = settings.state_dir / "benchmark-results/latest.json"
+    report_path = settings.vault_path / "_System/Health/benchmark-latest.md"
+    with lease_class(settings.vault_path, ttl_seconds=600) as lease:
+        before = lease.path.read_bytes()
+        output = benchmark._finish_benchmark(settings, cases)
+        assert output["report_publication"]["status"] == "deferred"
+        assert output["passed"] is (failed_case is None)
+        assert output["score"] == 100
+        assert json.loads(result_path.read_text()) == output
+        assert result_path.stat().st_mode & 0o777 == 0o600
+        assert not report_path.exists()
+        assert lease.path.read_bytes() == before
+
+    def no_live_cases(_settings):
+        pytest.fail("Report retry must not rerun benchmark cases")
+
+    monkeypatch.setattr(cli, "load_settings", lambda _: settings)
+    monkeypatch.setattr(benchmark, "run_benchmark", no_live_cases)
+    assert cli.main(["benchmark", "--publish-only"]) == (
+        0 if failed_case is None else 1
+    )
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["report_publication"]["status"] == "published"
+    assert recovered["cases"] == output["cases"]
+    assert recovered["ran_at"] == output["ran_at"]
+    assert recovered["passed"] == output["passed"]
+    assert (
+        "**Result:** PASS" if failed_case is None else "**Result:** FAIL"
+    ) in report_path.read_text()

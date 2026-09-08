@@ -12,7 +12,13 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
-def settings(tmp_path: Path) -> Settings:
+def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance.basic_memory_binary", lambda: None
+    )
+    monkeypatch.setattr(
+        "obsidian_sidecar.maintenance._command_status", lambda *_: "unavailable"
+    )
     vault = tmp_path / "vault"
     state = tmp_path / "state"
     vault.mkdir()

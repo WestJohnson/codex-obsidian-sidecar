@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import Settings
+from .maintenance import indexing_problem
 from .queueing import capture_health, runtime_problem
 from .vault import _atomic_write
 
@@ -36,7 +37,12 @@ def alert_status(settings: Settings, *, now: datetime | None = None) -> dict[str
     runtime_issue = runtime_problem(settings, now=checked_at)
     if runtime_issue:
         alerts.append(
-            {"code": runtime_issue, "title": "Obsidian local worker needs attention"}
+            {"code": runtime_issue, "title": "Obsidian runtime needs attention"}
+        )
+    index_issue = indexing_problem(settings)
+    if index_issue:
+        alerts.append(
+            {"code": index_issue, "title": "Obsidian search indexing needs attention"}
         )
     if captures["failed"] or captures["stalled"]:
         alerts.append(

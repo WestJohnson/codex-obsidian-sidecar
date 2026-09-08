@@ -73,7 +73,14 @@ def _parser() -> argparse.ArgumentParser:
         "--backup", action="store_true", help="commit a local Git backup"
     )
     subparsers.add_parser("daemon-once", help="process queue and run due maintenance")
-    subparsers.add_parser("benchmark", help="run the weighted end-to-end benchmark")
+    benchmark = subparsers.add_parser(
+        "benchmark", help="run the weighted end-to-end benchmark"
+    )
+    benchmark.add_argument(
+        "--publish-only",
+        action="store_true",
+        help="publish the saved benchmark result without rerunning cases",
+    )
     subparsers.add_parser(
         "cloud-doctor", help="inspect Syncthing, leases, and conflict state"
     )
@@ -234,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         result = process_ready(settings, force=args.force, curator=curator)
         print(json.dumps(result.__dict__, indent=2))
-        return 0 if result.failed == 0 else 1
+        return 0 if result.failed == 0 and result.reindex_result in {None, "ok"} else 1
     if args.command == "doctor":
         result = run_maintenance(settings, backup=args.backup)
         print(json.dumps(result, indent=2))
@@ -243,9 +250,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(daemon_once(settings), indent=2))
         return 0
     if args.command == "benchmark":
-        from .benchmark import run_benchmark
+        from .benchmark import publish_benchmark_report, run_benchmark
 
-        result = run_benchmark(settings)
+        result = (
+            publish_benchmark_report(settings)
+            if args.publish_only
+            else run_benchmark(settings)
+        )
         print(json.dumps(result, indent=2))
         return 0 if result["passed"] else 1
     if args.command == "cloud-doctor":

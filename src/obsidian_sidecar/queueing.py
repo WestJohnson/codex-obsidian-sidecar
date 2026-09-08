@@ -24,6 +24,16 @@ def has_usable_transcript_path(event: dict[str, Any]) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def capture_cutoff(event: dict[str, Any]) -> datetime:
+    value = event.get("captured_at")
+    if not isinstance(value, str):
+        raise ValueError("Capture timestamp must be an ISO timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Capture timestamp must include a timezone")
+    return parsed.astimezone(UTC)
+
+
 def event_key(event: dict[str, Any]) -> str:
     stable = "|".join(
         str(event.get(key) or "")
@@ -176,32 +186,47 @@ def capture_health(
     settings: Settings, *, now: datetime | None = None
 ) -> dict[str, int]:
     current = (now or datetime.now(UTC)).timestamp()
-    pending = list(settings.capture_pending_dir.glob("*.json"))
+    ages = []
+    for path in settings.capture_pending_dir.glob("*.json"):
+        try:
+            ages.append(current - path.stat().st_mtime)
+        except FileNotFoundError:
+            continue
     return {
-        "pending": len(pending),
-        "stalled": sum(current - path.stat().st_mtime >= 1_800 for path in pending),
+        "pending": len(ages),
+        "stalled": sum(age >= 1_800 for age in ages),
         "failed": len(list(settings.capture_failed_dir.glob("*.json"))),
     }
 
 
 def runtime_problem(settings: Settings, *, now: datetime | None = None) -> str | None:
-    path = settings.state_dir / "worker-status.json"
+    for name in ("worker", "cloud-maintenance"):
+        problem = _runtime_problem(settings, name, now=now)
+        if problem:
+            return problem
+    return None
+
+
+def _runtime_problem(
+    settings: Settings, name: str, *, now: datetime | None = None
+) -> str | None:
+    path = settings.state_dir / f"{name}-status.json"
     if not path.exists():
         return None  # Not yet deployed, or a cloud-only runtime.
     try:
         state = load_event(path)
-        if state.get("status") == "error":
-            return "worker-error"
+        if state.get("status") == "error" or state.get("failure"):
+            return f"{name}-error"
         current = now or datetime.now(UTC)
         checked_at = datetime.fromisoformat(state["checked_at"])
-        if (current - checked_at).total_seconds() >= 1800:
-            return "worker-stale"
+        if name == "worker" and (current - checked_at).total_seconds() >= 1800:
+            return f"{name}-stale"
         if state.get("deferred_since"):
             since = datetime.fromisoformat(state["deferred_since"])
             if (current - since).total_seconds() >= 1800:
-                return "worker-stalled"
+                return f"{name}-stalled"
     except (OSError, ValueError, KeyError, TypeError):
-        return "worker-status-invalid"
+        return f"{name}-status-invalid"
     return None
 
 
@@ -218,22 +243,35 @@ def save_event(path: Path, event: dict[str, Any]) -> None:
 
 def ready_groups(settings: Settings, *, force: bool = False) -> list[list[Path]]:
     now = datetime.now(UTC).timestamp()
-    by_session: dict[str, list[Path]] = defaultdict(list)
+    by_session: dict[tuple[str, str], list[Path]] = defaultdict(list)
+    cutoffs: dict[Path, datetime] = {}
+    arrivals: dict[Path, float] = {}
     for path in settings.queue_dir.glob("*.json"):
         try:
             event = load_event(path)
+            arrivals[path] = path.stat().st_mtime
+        except FileNotFoundError:
+            continue
         except Exception:
             move_event(path, settings.failed_dir, "invalid-json")
             continue
         session_id = str(event.get("session_id") or path.stem)
-        by_session[session_id].append(path)
+        try:
+            cutoffs[path] = capture_cutoff(event)
+            if not has_usable_transcript_path(event):
+                raise ValueError("Missing transcript path")
+            transcript = str(Path(event["transcript_path"]).expanduser().resolve())
+        except (OSError, ValueError):
+            cutoffs[path] = datetime.min.replace(tzinfo=UTC)
+            transcript = f"invalid:{path.name}"
+        by_session[session_id, transcript].append(path)
     ready: list[list[Path]] = []
     for paths in by_session.values():
-        paths.sort(key=lambda item: item.stat().st_mtime)
-        newest_age = now - paths[-1].stat().st_mtime
+        paths.sort(key=lambda item: (cutoffs[item], item.name))
+        newest_age = now - max(arrivals[path] for path in paths)
         if force or newest_age >= settings.debounce_seconds:
             ready.append(paths)
-    return sorted(ready, key=lambda group: group[-1].stat().st_mtime)
+    return sorted(ready, key=lambda group: max(arrivals[path] for path in group))
 
 
 def move_event(path: Path, destination: Path, suffix: str | None = None) -> Path:

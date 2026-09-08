@@ -91,6 +91,6 @@ def test_simultaneous_same_host_lease_acquisition_has_one_winner(tmp_path) -> No
 def test_machine_process_lock_rejects_overlapping_run(tmp_path) -> None:
     path = tmp_path / "cloud-maintenance.lock"
     with MachineProcessLock(path):
-        with pytest.raises(RuntimeError, match="already running"):
+        with pytest.raises(RuntimeError, match="host-lock"):
             with MachineProcessLock(path):
                 pass

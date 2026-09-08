@@ -78,8 +78,32 @@ class SharedLease:
         self.relative_path = relative_path
         self.owner = owner
         self.acquired = False
+        self.host_descriptor: int | None = None
 
     def __enter__(self) -> "SharedLease":
+        self.vault.mkdir(parents=True, exist_ok=True)
+        self.host_descriptor = os.open(self.vault, os.O_RDONLY)
+        try:
+            fcntl.flock(self.host_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(self.host_descriptor)
+            self.host_descriptor = None
+            active, reason, _ = _lease_status(
+                self.vault, self.relative_path, now=self.started_at
+            )
+            raise LeaseBusy(
+                self.relative_path, reason if active else "host-lock"
+            ) from error
+        except BaseException:
+            self._release_host_lock()
+            raise
+        try:
+            return self._acquire()
+        except BaseException:
+            self._release_host_lock()
+            raise
+
+    def _acquire(self) -> "SharedLease":
         value = {
             "schema": 1,
             "token": self.token,
@@ -117,6 +141,18 @@ class SharedLease:
         return self
 
     def __exit__(self, *_: object) -> None:
+        try:
+            self._release_lease()
+        finally:
+            self.acquired = False
+            self._release_host_lock()
+
+    def _release_host_lock(self) -> None:
+        if self.host_descriptor is not None:
+            os.close(self.host_descriptor)
+            self.host_descriptor = None
+
+    def _release_lease(self) -> None:
         if not self.acquired or not self.path.exists():
             return
         try:
@@ -174,9 +210,7 @@ class MachineProcessLock:
         except BlockingIOError as error:
             self.handle.close()
             self.handle = None
-            raise RuntimeError(
-                "cloud maintenance is already running on this host"
-            ) from error
+            raise LeaseBusy(LEASE_PATH, "host-lock") from error
         return self
 
     def __exit__(self, *_: object) -> None:

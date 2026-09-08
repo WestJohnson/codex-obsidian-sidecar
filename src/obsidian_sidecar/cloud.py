@@ -23,11 +23,15 @@ import yaml
 from .config import Settings
 from .coordination import (
     CloudLease,
+    LEASE_PATH,
+    LOCAL_WRITER_PATH,
+    LeaseBusy,
     MachineProcessLock,
     cloud_lease_status,
     local_writer_status,
 )
 from .maintenance import commit_git_backup, inspect_vault
+from .queueing import load_event, save_event
 from .security import contains_secret, redact_text
 from .vault import MANAGED_BY, _atomic_write, parse_frontmatter, vault_permalink
 from .worker import run_maintenance
@@ -1188,6 +1192,14 @@ def run_cloud_benchmark(
     return result
 
 
+def _check_cloud_contention(before: dict[str, Any]) -> None:
+    if not before["replica_complete"] or before["conflicts"]:
+        return
+    for key, path in (("local_writer", LOCAL_WRITER_PATH), ("lease", LEASE_PATH)):
+        if before[key]["active"]:
+            raise LeaseBusy(path, before[key]["reason"])
+
+
 def _run_offline_cloud_analysis(
     settings: Settings,
     *,
@@ -1197,6 +1209,7 @@ def _run_offline_cloud_analysis(
     force_agent: bool,
 ) -> dict[str, Any]:
     before = cloud_doctor(settings, client=client)
+    _check_cloud_contention(before)
     if not before["offline_read_safe"]:
         raise RuntimeError(f"offline cloud preflight failed: {json.dumps(before)}")
     if not settings.cloud_backup_dir:
@@ -1318,6 +1331,7 @@ def _run_connected_cloud_maintenance(
     checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
     before = cloud_doctor(settings, client=active_client)
+    _check_cloud_contention(before)
     if not before["healthy"]:
         raise RuntimeError(f"cloud preflight failed: {json.dumps(before)}")
     if not settings.cloud_backup_dir:
@@ -1342,9 +1356,7 @@ def _run_connected_cloud_maintenance(
         if post_lease_conflicts:
             raise RuntimeError("sync conflict appeared during cloud lease convergence")
         if writer_active:
-            raise RuntimeError(
-                f"local writer appeared during cloud lease convergence: {writer_reason}"
-            )
+            raise LeaseBusy(LOCAL_WRITER_PATH, writer_reason)
 
         backup = create_cloud_backup(
             settings.vault_path,
@@ -1500,6 +1512,59 @@ def run_cloud_maintenance(
     force_agent: bool = False,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
+    status_path = settings.state_dir / "cloud-maintenance-status.json"
+    try:
+        previous = load_event(status_path)
+    except (OSError, ValueError):
+        previous = {}
+    try:
+        result = _run_cloud_maintenance(
+            settings,
+            client=client,
+            agent=agent,
+            now=checked_at,
+            force_agent=force_agent,
+        )
+    except LeaseBusy as error:
+        result = {
+            "status": "deferred",
+            "reason": error.reason,
+            "checked_at": checked_at.isoformat(),
+        }
+        save_event(
+            status_path,
+            {
+                **result,
+                "deferred_since": previous.get("deferred_since")
+                or checked_at.isoformat(),
+                "failure": previous.get("failure"),
+            },
+        )
+        return result
+    except Exception as error:
+        save_event(
+            status_path,
+            {
+                "status": "error",
+                "checked_at": checked_at.isoformat(),
+                "error": type(error).__name__,
+                "failure": type(error).__name__,
+            },
+        )
+        raise
+    save_event(status_path, {"status": "ok", "checked_at": checked_at.isoformat()})
+    return result
+
+
+def _run_cloud_maintenance(
+    settings: Settings,
+    *,
+    client: SyncClient | None = None,
+    agent: CloudAgent | None = None,
+    now: datetime | None = None,
+    force_agent: bool = False,
+) -> dict[str, Any]:
+    checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
     with MachineProcessLock(settings.lock_dir / "cloud-maintenance.lock"):
         initial = active_client.snapshot()
@@ -1578,23 +1643,34 @@ def run_cloud_reconcile(
             "reason": "source or task fingerprints changed; nightly maintenance must recompute",
         }
 
-    _atomic_write(
-        state_path,
-        json.dumps(
+    try:
+        result = run_cloud_maintenance(
+            settings,
+            client=active_client,
+            now=checked_at,
+        )
+    except Exception:
+        save_event(
+            state_path,
             {
+                **prior,
                 "schema": 1,
                 "last_attempt_at": checked_at.isoformat(),
-                "status": "publishing",
+                "status": "error",
             },
-            indent=2,
         )
-        + "\n",
-    )
-    result = run_cloud_maintenance(
-        settings,
-        client=active_client,
-        now=checked_at,
-    )
+        raise
+    if result.get("status") != "ok":
+        save_event(
+            state_path,
+            {
+                **prior,
+                "schema": 1,
+                "checked_at": checked_at.isoformat(),
+                "status": result.get("status", "unknown"),
+            },
+        )
+        return result
     _atomic_write(
         state_path,
         json.dumps(

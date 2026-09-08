@@ -13,7 +13,7 @@ from typing import Any
 import yaml
 
 from .config import Settings
-from .queueing import capture_health, runtime_problem
+from .queueing import capture_health, load_event, runtime_problem, save_event, utc_now
 from .security import contains_secret
 from .vault import (
     MANAGED_BY,
@@ -53,6 +53,7 @@ class VaultHealth:
     capture_stalled: int = 0
     capture_failed: int = 0
     runtime_problem: str | None = None
+    indexing_problem: str | None = None
     obsidian_cli: str = "unknown"
     basic_memory: str = "unknown"
     git_backup: str = "unknown"
@@ -91,7 +92,12 @@ class VaultHealth:
             penalty += 5
         ceiling = (
             79
-            if self.capture_stalled or self.capture_failed or self.runtime_problem
+            if (
+                self.capture_stalled
+                or self.capture_failed
+                or self.runtime_problem
+                or self.indexing_problem
+            )
             else 100
         )
         return max(0, min(ceiling, 100 - penalty))
@@ -188,7 +194,36 @@ def basic_memory_status(settings: Settings) -> str:
     return "unknown"
 
 
+def indexing_problem(settings: Settings) -> str | None:
+    path = settings.state_dir / "index-status.json"
+    try:
+        state = load_event(path)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return "index-status-invalid"
+    return None if state.get("status") == "ok" else "basic-memory-index-error"
+
+
 def reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
+    path = settings.state_dir / "index-status.json"
+    try:
+        previous = load_event(path)
+    except (OSError, ValueError):
+        previous = {}
+    full = full or (previous.get("status") != "ok" and previous.get("full") is True)
+    state = {"checked_at": utc_now(), "status": "running", "full": full}
+    save_event(path, state)
+    try:
+        result = _reindex_basic_memory(settings, full=full)
+    except Exception:
+        save_event(path, {**state, "checked_at": utc_now(), "status": "error"})
+        raise
+    save_event(path, {**state, "checked_at": utc_now(), "status": result})
+    return result
+
+
+def _reindex_basic_memory(settings: Settings, *, full: bool = False) -> str:
     binary = basic_memory_binary()
     if not binary:
         return "unavailable"
@@ -373,6 +408,7 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
     health.capture_stalled = captures["stalled"]
     health.capture_failed = captures["failed"]
     health.runtime_problem = runtime_problem(settings)
+    health.indexing_problem = indexing_problem(settings)
     if settings.runtime_role == "cloud":
         health.obsidian_cli = "not-required"
         health.basic_memory = "not-required"
@@ -389,6 +425,8 @@ def inspect_vault(settings: Settings, *, create_layout: bool = True) -> VaultHea
         if sys.platform.startswith("linux") and not Path(obsidian_binary).exists():
             health.obsidian_cli = "not-required"
         health.basic_memory = basic_memory_status(settings)
+        if health.indexing_problem:
+            health.basic_memory = "error"
     health.git_backup = git_status(settings.vault_path)
     return health
 
@@ -437,6 +475,7 @@ def render_health(health: VaultHealth, *, permalink: str | None = None) -> str:
 
 - Obsidian CLI: `{health.obsidian_cli}`
 - Basic Memory: `{health.basic_memory}`
+- Search indexing: {health.indexing_problem or "ok"}
 - Git backup: `{health.git_backup}`
 - Queue pending: {health.queue_pending}
 - Queue failed: {health.queue_failed}

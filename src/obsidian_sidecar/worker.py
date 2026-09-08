@@ -4,7 +4,6 @@ import fcntl
 import json
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +17,13 @@ from .coordination import LeaseBusy, LocalWriterLease, cloud_lease_status
 from .curator import CodexLunaCurator, Curator
 from .maintenance import (
     commit_git_backup,
+    indexing_problem,
     inspect_vault,
     reindex_basic_memory,
     write_health_report,
 )
 from .queueing import (
+    capture_cutoff,
     has_usable_transcript_path,
     load_event,
     move_event,
@@ -126,14 +127,26 @@ def _checkpoint_coverage(
     ):
         return None
     try:
-        boundary = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        capture_cutoff(event)
     except ValueError:
-        return None
-    if boundary.tzinfo is None:
         return None
 
     checkpoint = load_checkpoint(settings, session_id)
     if checkpoint is None:
+        return None
+    return _cursor_coverage(event, checkpoint)
+
+
+def _cursor_coverage(
+    event: dict[str, Any], checkpoint: dict[str, Any]
+) -> dict[str, int] | None:
+    try:
+        if capture_cutoff(event) > capture_cutoff(checkpoint):
+            return None
+    except ValueError:
+        return None
+    transcript_value = event.get("transcript_path")
+    if not has_usable_transcript_path(event):
         return None
     cursor = checkpoint.get("cursor")
     if not isinstance(cursor, dict):
@@ -146,7 +159,8 @@ def _checkpoint_coverage(
     if (
         not transcript_path.is_file()
         or not checkpoint_path_value
-        or Path(checkpoint_path_value).expanduser() != transcript_path
+        or Path(checkpoint_path_value).expanduser().resolve()
+        != transcript_path.resolve()
         or isinstance(checkpoint_offset, bool)
         or not isinstance(checkpoint_offset, int)
         or checkpoint_offset < 0
@@ -157,7 +171,7 @@ def _checkpoint_coverage(
     ):
         return None
 
-    event_boundary = _cursor_at_cutoff(transcript_path, captured_at)
+    event_boundary = _cursor_at_cutoff(transcript_path, event["captured_at"])
     if checkpoint_offset < event_boundary:
         return None
     return {
@@ -165,6 +179,29 @@ def _checkpoint_coverage(
         "checkpoint_byte_offset": checkpoint_offset,
         "event_boundary_byte_offset": event_boundary,
     }
+
+
+def _retire_covered_events(
+    paths: list[Path], settings: Settings, packet: dict[str, Any]
+) -> int:
+    covered = []
+    for path in paths:
+        event = load_event(path)
+        if settings.checkpoint_enabled:
+            coverage = _checkpoint_coverage(settings, event)
+        else:
+            coverage = _cursor_coverage(
+                event,
+                {
+                    "cursor": packet["checkpoint"]["cursor"],
+                    "captured_at": packet["captured_at"],
+                    "update_count": 1,
+                },
+            )
+        if coverage is not None:
+            covered.append(path)
+    _mark_group(covered, settings, "processed")
+    return len(covered)
 
 
 def reconcile_superseded_failures(settings: Settings) -> int:
@@ -218,7 +255,8 @@ def _process_ready(
         summary.reconciled_failed_events = reconcile_superseded_failures(settings)
         groups = ready_groups(settings, force=force)
         summary.groups_seen = len(groups)
-        if not groups:
+        retry_index = settings.runtime_role == "local" and indexing_problem(settings)
+        if not groups and not retry_index:
             return summary
         with LocalWriterLease(
             settings.vault_path,
@@ -232,6 +270,10 @@ def _process_ready(
                 event = None
                 for candidate in reversed(paths):
                     candidate_event = load_event(candidate)
+                    try:
+                        capture_cutoff(candidate_event)
+                    except ValueError:
+                        continue
                     if has_usable_transcript_path(candidate_event):
                         event = candidate_event
                         break
@@ -308,9 +350,9 @@ def _process_ready(
                         summary.skipped += 1
                         if bool((packet.get("checkpoint") or {}).get("has_more")):
                             summary.checkpoint_chunks_pending += 1
-                        else:
-                            _mark_group(paths, settings, "processed")
-                            summary.processed_events += len(paths)
+                        summary.processed_events += _retire_covered_events(
+                            paths, settings, packet
+                        )
                         continue
                     result = write_curation(
                         settings,
@@ -329,19 +371,19 @@ def _process_ready(
                     summary.note_paths.append(str(result.note_path))
                     if bool((packet.get("checkpoint") or {}).get("has_more")):
                         summary.checkpoint_chunks_pending += 1
-                    else:
-                        _mark_group(paths, settings, "processed")
-                        summary.processed_events += len(paths)
+                    summary.processed_events += _retire_covered_events(
+                        paths, settings, packet
+                    )
                 except Exception as exc:
                     summary.failed += 1
                     _record_failure(paths, settings, exc)
-    if summary.notes_written:
-        summary.reindex_result = reindex_basic_memory(settings)
+            if summary.notes_written or retry_index:
+                summary.reindex_result = reindex_basic_memory(settings)
     return summary
 
 
 def _deferred_maintenance(settings: Settings, reason: str) -> dict[str, Any]:
-    health = inspect_vault(settings)
+    health = inspect_vault(settings, create_layout=False)
     return {
         **asdict(health),
         "critical_failures": health.critical_failures,
@@ -364,8 +406,11 @@ def _run_maintenance_unfenced(
         health.basic_memory = "not-required"
     else:
         reindex_result = reindex_basic_memory(settings)
+        health.indexing_problem = indexing_problem(settings)
         if reindex_result == "ok":
             health.basic_memory = "ok"
+        else:
+            health.basic_memory = reindex_result
     backup_result = "disabled"
     if backup and settings.auto_git_backup and health.critical_failures == 0:
         health.git_backup = "ok"
@@ -382,6 +427,7 @@ def _run_maintenance_unfenced(
         "warnings": health.warnings,
         "score": health.score,
         "backup_result": backup_result,
+        "reindex_result": reindex_result,
     }
 
 
@@ -494,6 +540,13 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
             "disabled",
             "deferred",
         }
+        failed = failed or bool(indexing_problem(settings))
+        failed = failed or processing.get("reindex_result") not in {None, "ok"}
+        failed = failed or maintenance.get("reindex_result") not in {
+            None,
+            "ok",
+            "not-required",
+        }
         status = {
             "checked_at": utc_now(),
             "status": "error" if failed else ("deferred" if deferred else "ok"),
@@ -504,6 +557,22 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
             )
             status["reason"] = deferred
         save_event(status_path, status)
+        if processing.get("reindex_result") or maintenance.get("reindex_result"):
+            health = inspect_vault(settings, create_layout=False)
+            if not health.indexing_problem and (
+                processing.get("reindex_result") == "ok"
+                or maintenance.get("reindex_result") == "ok"
+            ):
+                health.basic_memory = "ok"
+            save_event(
+                settings.state_dir / "health.json",
+                {
+                    **asdict(health),
+                    "critical_failures": health.critical_failures,
+                    "warnings": health.warnings,
+                    "score": health.score,
+                },
+            )
         result["alerts"] = _run_alerts(settings)
         return result
 

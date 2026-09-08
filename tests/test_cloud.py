@@ -25,7 +25,11 @@ from obsidian_sidecar.cloud import (
     validate_cloud_backup,
 )
 from obsidian_sidecar.config import Settings
-from obsidian_sidecar.coordination import CloudLease, LocalWriterLease
+from obsidian_sidecar.coordination import (
+    CloudLease,
+    LocalWriterLease,
+    MachineProcessLock,
+)
 from obsidian_sidecar.vault import parse_frontmatter
 
 
@@ -96,6 +100,145 @@ def cloud_settings(settings: Settings, tmp_path: Path) -> Settings:
         cloud_settle_timeout_seconds=5,
         auto_git_backup=True,
     )
+
+
+@pytest.mark.parametrize("contention", ["writer", "cloud", "host"])
+@pytest.mark.parametrize("connected", [True, False])
+def test_cloud_contention_defers_without_work_and_recovers(
+    settings, tmp_path, contention, connected
+):
+    from obsidian_sidecar.alerts import alert_status
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    locks = {
+        "writer": LocalWriterLease(configured.vault_path, ttl_seconds=600),
+        "cloud": CloudLease(configured.vault_path, ttl_seconds=600),
+        "host": MachineProcessLock(configured.lock_dir / "cloud-maintenance.lock"),
+    }
+    client = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", connected))
+    agent = FakeAgent()
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    with locks[contention]:
+        result = run_cloud_maintenance(configured, client=client, agent=agent)
+        assert result["status"] == "deferred"
+        assert agent.calls == 0
+        assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+        assert alert_status(configured)["healthy"]
+    result = run_cloud_maintenance(configured, client=client, agent=agent)
+    assert result["status"] == ("ok" if connected else "offline-staged")
+    assert agent.calls == 1
+    state = load_event(configured.state_dir / "cloud-maintenance-status.json")
+    assert state["status"] == "ok"
+    assert "deferred_since" not in state
+
+
+def test_reconcile_contention_preserves_retry_eligibility(settings, tmp_path):
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    agent = FakeAgent()
+    offline = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False))
+    run_cloud_maintenance(configured, client=offline, agent=agent)
+    staged_path = configured.state_dir / "cloud-staged-report.json"
+    staged = staged_path.read_bytes()
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        deferred = run_cloud_reconcile(configured, client=FakeSync())
+    assert deferred["status"] == "deferred"
+    state = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert "last_attempt_at" not in state
+    assert "last_success_at" not in state
+    assert staged_path.read_bytes() == staged
+    recovered = run_cloud_reconcile(configured, client=FakeSync())
+    assert recovered["status"] == "published"
+    assert recovered["result"]["agent"]["reason"].startswith(
+        "published validated offline"
+    )
+    assert agent.calls == 1
+    assert not staged_path.exists()
+
+
+def test_cloud_contention_does_not_hide_sync_failure(settings, tmp_path):
+    from obsidian_sidecar.alerts import alert_status
+
+    configured = cloud_settings(settings, tmp_path)
+    broken = FakeSync(SyncSnapshot("idle", 1, 0, 0, 100, "valid", True))
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        with pytest.raises(RuntimeError, match="preflight failed"):
+            run_cloud_maintenance(configured, client=broken)
+        assert (
+            run_cloud_maintenance(configured, client=FakeSync())["status"] == "deferred"
+        )
+        assert "cloud-maintenance-error" in {
+            item["code"] for item in alert_status(configured)["alerts"]
+        }
+
+
+def test_cloud_long_deferral_is_visible_and_clears_on_recovery(settings, tmp_path):
+    from datetime import timedelta
+    from obsidian_sidecar.alerts import alert_status
+    from obsidian_sidecar.maintenance import inspect_vault
+
+    configured = cloud_settings(settings, tmp_path)
+    now = datetime.now(UTC)
+    offline = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False))
+    with LocalWriterLease(configured.vault_path, ttl_seconds=3600):
+        assert (
+            run_cloud_maintenance(configured, client=offline, now=now)["status"]
+            == "deferred"
+        )
+        assert (
+            run_cloud_maintenance(
+                configured, client=offline, now=now + timedelta(minutes=31)
+            )["status"]
+            == "deferred"
+        )
+        assert "cloud-maintenance-stalled" in {
+            item["code"]
+            for item in alert_status(configured, now=now + timedelta(minutes=31))[
+                "alerts"
+            ]
+        }
+    run_cloud_maintenance(configured, client=offline)
+    assert alert_status(configured)["healthy"]
+    assert inspect_vault(configured).runtime_problem is None
+
+
+def test_reconcile_sync_failure_still_consumes_cooldown(settings, tmp_path):
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    offline = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False))
+    run_cloud_maintenance(configured, client=offline, agent=FakeAgent())
+
+    class FailingSync(FakeSync):
+        def wait_healthy(self, timeout_seconds):
+            return SyncSnapshot("syncing", 1, 1, 1, 90, "valid", True)
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        run_cloud_reconcile(configured, client=FailingSync())
+    state = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert state["status"] == "error"
+    assert state["last_attempt_at"]
+    assert (
+        run_cloud_reconcile(configured, client=FakeSync())["status"] == "rate-limited"
+    )
+
+
+def test_cloud_cli_returns_success_for_expected_contention(
+    settings, tmp_path, monkeypatch, capsys
+):
+    from obsidian_sidecar import cli
+    from obsidian_sidecar.cloud import SyncthingClient
+
+    configured = cloud_settings(settings, tmp_path)
+    monkeypatch.setattr(cli, "load_settings", lambda _: configured)
+    monkeypatch.setattr(SyncthingClient, "from_settings", lambda _: FakeSync())
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        assert cli.main(["cloud-maintenance"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "deferred"
 
 
 def test_sync_snapshot_distinguishes_complete_offline_replica_from_healthy_sync() -> (
@@ -824,10 +967,11 @@ def test_cloud_maintenance_yields_to_writer_that_appears_during_lease_sync(
             )
             return super().wait_healthy(timeout_seconds)
 
-    with pytest.raises(RuntimeError, match="local writer appeared during"):
-        run_cloud_maintenance(
-            configured, client=RacingSync(), agent=FakeAgent(), now=NOW
-        )
+    result = run_cloud_maintenance(
+        configured, client=RacingSync(), agent=FakeAgent(), now=NOW
+    )
+    assert result["status"] == "deferred"
+    assert result["reason"] == "local-writer-active"
 
     assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
     assert not (
