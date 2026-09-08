@@ -27,6 +27,12 @@
 - Retain unfinished transcript tails, resolve transcript-only session identity
   before checkpoint lookup, and distinguish active from interrupted indexing.
 - Include the testing, operations, and cloud-sync guides in offline bundles.
+- Preserve real failures through contention, serialize cloud and reconnect
+  status transitions, and resolve processing alerts after successful manual
+  recovery without clearing unrelated failures. Publication-only retries do
+  not trigger fresh analysis when a staged report becomes stale.
+- Compute grouped capture cutoffs in one transcript snapshot and accept complete
+  long routing headers without retaining their instructions as model evidence.
 
 ## 0.6.3 - 2026-08-19
 

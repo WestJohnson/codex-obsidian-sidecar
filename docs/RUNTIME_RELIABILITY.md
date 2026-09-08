@@ -57,6 +57,8 @@ record is covered, including when it finishes while a packet is being built.
 Transcript-only hooks resolve their canonical session header and missing working
 directory before checkpoint selection and retirement. Hooks with an explicit
 session ID also recover a missing working directory from the validated header.
+Routing accepts complete long session headers; only the routing whitelist is
+retained, not embedded harness instructions. Model evidence limits are unchanged.
 Canonical identity is resolved before grouping and debounce; each capture keeps
 its original cutoff. Incremental packets retain that Git and artifact base while
 preserving explicit hook routing values.
@@ -78,6 +80,12 @@ the periodic health report. A closed laptop will legitimately report a stale
 local worker until its next successful tick. A missing status file is not itself
 reported as stale; confirm the service has run using the
 [platform checks](OPERATIONS.md#routine-checks).
+
+`processing-status.json` records actual processing outcomes under the shared
+worker lock for both the timer and `process --force`. Successful manual recovery
+resolves the corresponding processing alert before the next tick. Empty or
+deferred work is not recovery, and other failed events or backup/indexing failures
+remain actionable. The receipt contains status and time, not capture content.
 
 `cloud-maintenance-status.json` records cloud errors and continuous contention.
 A prior cloud failure remains visible through subsequent deferrals until a

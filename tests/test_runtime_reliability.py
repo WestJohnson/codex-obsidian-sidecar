@@ -1382,3 +1382,103 @@ def test_group_retirement_scans_once_and_preserves_incomplete_tail(
         save_event(checkpoint_path(settings, SESSION), checkpoint)
     assert retire([paths[-1]]) == 1
     assert not paths[-1].exists()
+
+
+@pytest.mark.parametrize("backup_failure", [False, True])
+@pytest.mark.parametrize("other_failed_event", [False, True])
+def test_manual_processing_recovery_resolves_only_recovered_failure(
+    settings,
+    transcript_path,
+    valid_curation,
+    monkeypatch,
+    backup_failure,
+    other_failed_event,
+):
+    from obsidian_sidecar import maintenance, worker
+    from obsidian_sidecar.queueing import processing_status, runtime_problem
+
+    class Failure:
+        def curate(self, _packet):
+            raise RuntimeError("fixture curation failure")
+
+    monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: Failure())
+    monkeypatch.setattr(worker, "_maintenance_due", lambda _: False)
+    monkeypatch.setattr(
+        maintenance, "_reindex_basic_memory", lambda *_args, **_kwargs: "ok"
+    )
+    enqueue_event(
+        settings,
+        {
+            "session_id": "fixture-session-001",
+            "transcript_path": str(transcript_path),
+            "captured_at": "2026-07-14T08:01:00Z",
+        },
+    )
+    assert daemon_once(settings)["processing"]["failed"] == 1
+    assert processing_status(settings) == "error"
+    path = settings.state_dir / "worker-status.json"
+    state = load_event(path)
+    assert state["failure"]["processing"]
+    if backup_failure:
+        state["failure"]["backup"] = "failed"
+        save_event(path, state)
+    if other_failed_event:
+        save_event(
+            settings.failed_dir / "other.json",
+            {"session_id": "unrecovered", "last_error": "fixture failure"},
+        )
+    result = process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    assert result.failed == 0
+    assert result.processed_events == 1
+    assert processing_status(settings) == ("error" if other_failed_event else "ok")
+    # Recovery is observable before the next timer, but cannot erase a different
+    # operation's failure or another unprocessed event.
+    expected = "worker-error" if backup_failure or other_failed_event else None
+    assert runtime_problem(settings) == expected
+    daemon_once(settings)
+    assert runtime_problem(settings) == expected
+    if not other_failed_event:
+        assert "processing" not in load_event(path)["failure"]
+    if backup_failure:
+        assert load_event(path)["failure"]["backup"]
+
+
+@pytest.mark.parametrize("supplied_identity", [False, True])
+def test_long_session_header_recovers_routing_without_retaining_instructions(
+    transcript_path, supplied_identity
+):
+    from obsidian_sidecar.transcript import build_curation_packet, resolve_session_event
+
+    lines = transcript_path.read_text().splitlines(keepends=True)
+    header = json.loads(lines[0])
+    marker = "HEADER_ONLY_INSTRUCTION_FIELD"
+    header["payload"]["instructions"] = marker * 5000
+    transcript_path.write_text(json.dumps(header) + "\n" + "".join(lines[1:]))
+    event = {
+        "transcript_path": str(transcript_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    if supplied_identity:
+        event["session_id"] = header["payload"]["id"]
+    resolved = resolve_session_event(event)
+    assert resolved["session_id"] == header["payload"]["id"]
+    assert resolved["cwd"] == header["payload"]["cwd"]
+    assert marker not in json.dumps(resolved)
+    packet = build_curation_packet(event)
+    assert marker not in json.dumps(packet)
+    assert packet["evidence"]
+
+
+def test_missing_path_recovery_accepts_complete_long_header(
+    settings, monkeypatch, tmp_path
+):
+    root = incomplete_hook(settings, monkeypatch, tmp_path)
+    transcript = make_transcript(root)
+    header = json.loads(transcript.read_text())
+    marker = "HEADER_ONLY_PRIVATE_CONTEXT"
+    header["payload"]["instructions"] = marker * 5000
+    transcript.write_text(json.dumps(header) + "\n")
+    assert recover_captures(settings) == 1
+    event = next(settings.queue_dir.glob("*.json"))
+    assert load_event(event)["transcript_path"] == str(transcript)
+    assert marker not in event.read_text()

@@ -142,7 +142,7 @@ def _find_transcript(event: dict[str, Any]) -> Path | None:
                 continue
             try:
                 with resolved.open(encoding="utf-8") as handle:
-                    header = json.loads(handle.readline(65_536))
+                    header = json.loads(handle.readline())
                 metadata = header.get("payload", {})
                 if (
                     header.get("type") != "session_meta"
@@ -202,7 +202,20 @@ def capture_health(
     }
 
 
+def processing_status(settings: Settings) -> str | None:
+    """Latest actual processing outcome, shared by timer and manual callers."""
+    try:
+        status = load_event(settings.state_dir / "processing-status.json").get("status")
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return "error"
+    return status if isinstance(status, str) and status in {"ok", "error"} else "error"
+
+
 def runtime_problem(settings: Settings, *, now: datetime | None = None) -> str | None:
+    if processing_status(settings) == "error":
+        return "worker-error"
     for name in ("worker", "cloud-maintenance"):
         problem = _runtime_problem(settings, name, now=now)
         if problem:
@@ -218,6 +231,21 @@ def _runtime_problem(
         return None  # Not yet deployed, or a cloud-only runtime.
     try:
         state = load_event(path)
+        failure = state.get("failure")
+        if (
+            name == "worker"
+            and isinstance(failure, dict)
+            and failure.get("processing")
+            and processing_status(settings) == "ok"
+        ):
+            # Manual recovery may finish between daemon ticks. Its serialized
+            # receipt resolves only processing, never backup/index/tick failures.
+            remaining = {
+                key: value for key, value in failure.items() if key != "processing"
+            }
+            state = {**state, "failure": remaining}
+            if not remaining and state.get("status") == "error":
+                state["status"] = "ok"
         if state.get("status") == "error" or state.get("failure"):
             return f"{name}-error"
         current = now or datetime.now(UTC)

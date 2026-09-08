@@ -413,8 +413,7 @@ def test_final_convergence_classifies_contention_before_failure_retries(
         f"cloud-convergence-{condition}",
         {
             "scope": (
-                "Synthetic Syncthing race with real lease, maintenance "
-                "and retry state."
+                "Synthetic Syncthing race with real lease, maintenance and retry state."
             ),
             "condition": condition,
             "maintenance_result": maintenance_result,
@@ -1622,3 +1621,95 @@ def test_openrouter_agent_blocks_before_daily_spend_ceiling(
         )
 
     assert calls == ["https://openrouter.ai/api/v1/key"]
+
+
+def test_reconnect_admission_preserves_owner_failure_cooldown(
+    settings, tmp_path, monkeypatch
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    save_event(
+        configured.state_dir / "cloud-maintenance-status.json",
+        {"maintenance_due": True},
+    )
+    entered, release = Event(), Event()
+    calls = []
+
+    def fail(_settings, **kwargs):
+        calls.append(kwargs)
+        entered.set()
+        assert release.wait(5)
+        raise RuntimeError("fixture transaction failure")
+
+    monkeypatch.setattr(cloud, "run_cloud_maintenance", fail)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        owner = pool.submit(run_cloud_reconcile, configured, client=FakeSync(), now=NOW)
+        try:
+            assert entered.wait(5)
+            contender = run_cloud_reconcile(configured, client=FakeSync(), now=NOW)
+            assert contender["status"] == "deferred"
+            assert len(calls) == 1
+        finally:
+            release.set()
+        with pytest.raises(RuntimeError, match="fixture transaction failure"):
+            owner.result(timeout=5)
+    state = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert state["last_attempt_at"] == NOW.isoformat()
+    assert state["status"] == "error"
+    assert (
+        run_cloud_reconcile(configured, client=FakeSync(), now=NOW)["status"]
+        == "rate-limited"
+    )
+    assert len(calls) == 1
+
+
+def test_publication_deferral_does_not_promote_stale_stage_to_analysis(
+    settings, tmp_path, monkeypatch
+):
+    from obsidian_sidecar.queueing import load_event
+
+    configured = cloud_settings(settings, tmp_path)
+    source = configured.vault_path / "project.md"
+    source.write_text("# Project\nOriginal source.\n")
+    agent = FakeAgent()
+    run_cloud_maintenance(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        agent=agent,
+    )
+    staged_path = configured.state_dir / "cloud-staged-report.json"
+    staged = staged_path.read_bytes()
+    with LocalWriterLease(configured.vault_path, ttl_seconds=600):
+        assert (
+            run_cloud_reconcile(configured, client=FakeSync())["status"] == "deferred"
+        )
+    assert not load_event(configured.state_dir / "cloud-maintenance-status.json").get(
+        "maintenance_due"
+    )
+    source.write_text("# Project\nChanged source.\n")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("publication-only reconnect must not make a fresh model call")
+
+    monkeypatch.setattr(OpenRouterCloudAgent, "analyze", forbidden)
+    result = run_cloud_reconcile(configured, client=FakeSync())
+    assert result["status"] == "stale-stage"
+    assert staged_path.read_bytes() == staged
+    assert agent.calls == 1
+
+
+def test_publication_deferral_preserves_existing_nightly_obligation(settings):
+    from obsidian_sidecar.cloud import _record_cloud_status
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    path = settings.state_dir / "cloud-maintenance-status.json"
+    save_event(path, {"maintenance_due": True, "failure": "RuntimeError"})
+    _record_cloud_status(
+        settings,
+        {"status": "deferred", "checked_at": NOW.isoformat()},
+        maintenance_requested=False,
+    )
+    assert load_event(path)["maintenance_due"] is True
+    assert load_event(path)["failure"] == "RuntimeError"

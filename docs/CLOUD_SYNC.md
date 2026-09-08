@@ -141,6 +141,9 @@ under the same staging rules. Real transaction attempts remain limited to one
 per ten minutes.
 Contention deferrals leave the stage intact and do not advance the publish
 attempt clock; a failed transaction still consumes the retry interval.
+Reconnect admission and retry-state writes share a process lock, so a competing
+probe cannot erase a newer failure's cooldown. A publication-only deferral does
+not make nightly analysis due; an already pending nightly obligation is preserved.
 For staged publication alone, it invokes the full fenced transaction only after
 Syncthing is healthy and the source/task fingerprints still match. A stale stage
 waits for nightly maintenance to discard and recompute it. When nightly work was

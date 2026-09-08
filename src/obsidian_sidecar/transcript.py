@@ -461,7 +461,9 @@ def resolve_session_event(event: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(path, str) or not path.strip():
         raise ValueError("Hook event has no transcript_path")
     with Path(path).expanduser().open(encoding="utf-8") as handle:
-        header = json.loads(handle.readline(65_536))
+        # The header can contain long harness instructions. Parse the complete
+        # record, then retain only the routing whitelist below, never its body.
+        header = json.loads(handle.readline())
     if not isinstance(header, dict) or header.get("type") != "session_meta":
         raise ValueError("Transcript has no session metadata header")
     payload = header.get("payload")
@@ -514,9 +516,7 @@ def build_curation_packet(
             )
             checkpoint_mode = "incremental"
         except (OSError, ValueError, TypeError):
-            batch = extract_message_tail(
-                transcript_path, before_timestamp=cutoff
-            )
+            batch = extract_message_tail(transcript_path, before_timestamp=cutoff)
             checkpoint_mode = "recovery"
     else:
         batch = extract_message_tail(transcript_path, before_timestamp=cutoff)

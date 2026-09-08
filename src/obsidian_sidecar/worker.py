@@ -30,6 +30,7 @@ from .queueing import (
     load_event,
     move_event,
     ready_groups,
+    processing_status,
     recover_captures,
     save_event,
     utc_now,
@@ -300,6 +301,34 @@ def process_ready(
         return ProcessSummary(deferred_reason=error.reason)
 
 
+def _record_processing_outcome(
+    settings: Settings, summary: ProcessSummary
+) -> ProcessSummary:
+    # Called while worker.lock is held, so a stale observer cannot replace a
+    # newer manual/daemon result. Empty or deferred ticks are not recovery.
+    failed = bool(summary.failed) or any(settings.failed_dir.glob("*.json"))
+    did_work = bool(summary.groups_seen or summary.reconciled_failed_events)
+    if not failed and did_work:
+        for path in settings.queue_dir.glob("*.json"):
+            try:
+                if load_event(path).get("last_error"):
+                    failed = True
+                    break
+            except (OSError, ValueError):
+                failed = True
+                break
+    if failed or (did_work and not summary.deferred_reason):
+        save_event(
+            settings.state_dir / "processing-status.json",
+            {
+                "schema": 1,
+                "checked_at": utc_now(),
+                "status": "error" if failed else "ok",
+            },
+        )
+    return summary
+
+
 def _process_ready(
     settings: Settings, *, force: bool = False, curator: Curator | None = None
 ) -> ProcessSummary:
@@ -319,7 +348,7 @@ def _process_ready(
         summary.groups_seen = len(groups)
         retry_index = settings.runtime_role == "local" and indexing_problem(settings)
         if not groups and not retry_index:
-            return summary
+            return _record_processing_outcome(settings, summary)
         with LocalWriterLease(
             settings.vault_path,
             ttl_seconds=max(900, settings.curator_timeout_seconds * len(groups) + 300),
@@ -444,7 +473,7 @@ def _process_ready(
                     _record_failure(paths, settings, exc)
             if summary.notes_written or retry_index:
                 summary.reindex_result = reindex_basic_memory(settings)
-    return summary
+        return _record_processing_outcome(settings, summary)
 
 
 def _deferred_maintenance(settings: Settings, reason: str) -> dict[str, Any]:
@@ -623,7 +652,12 @@ def daemon_once(settings: Settings) -> dict[str, Any]:
         )
         if checkpoint.get("status") == "deferred":
             deferred = deferred or checkpoint.get("reason")
-        if processing.get("failed"):
+        receipt = processing_status(settings)
+        if receipt == "error":
+            failures["processing"] = "failed"
+        elif receipt == "ok":
+            failures.pop("processing", None)
+        elif processing.get("failed"):
             failures["processing"] = "failed"
         elif not processing.get("deferred_reason") and (
             processing.get("groups_seen") or processing.get("reconciled_failed_events")

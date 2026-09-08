@@ -1362,12 +1362,14 @@ def _run_connected_cloud_maintenance(
         writer_active, writer_reason, _ = local_writer_status(settings.vault_path)
         if post_lease_conflicts:
             raise RuntimeError("sync conflict appeared during cloud lease convergence")
-        _check_cloud_contention({
-            "sync": asdict(settled),
-            "conflicts": post_lease_conflicts,
-            "local_writer": {"active": writer_active, "reason": writer_reason},
-            "lease": {"active": False},
-        })
+        _check_cloud_contention(
+            {
+                "sync": asdict(settled),
+                "conflicts": post_lease_conflicts,
+                "local_writer": {"active": writer_active, "reason": writer_reason},
+                "lease": {"active": False},
+            }
+        )
         if not settled.healthy:
             raise RuntimeError("cloud lease did not converge to the peer")
 
@@ -1516,7 +1518,9 @@ def _run_connected_cloud_maintenance(
     }
 
 
-def _record_cloud_status(settings: Settings, status: dict[str, Any]) -> None:
+def _record_cloud_status(
+    settings: Settings, status: dict[str, Any], *, maintenance_requested: bool = True
+) -> None:
     status_path = settings.state_dir / "cloud-maintenance-status.json"
     settings.lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (settings.lock_dir / "cloud-status.lock").open("a+b") as handle:
@@ -1532,7 +1536,8 @@ def _record_cloud_status(settings: Settings, status: dict[str, Any]) -> None:
                 or status["checked_at"],
                 "failure": previous.get("failure")
                 or ("error" if previous.get("status") == "error" else None),
-                "maintenance_due": True,
+                "maintenance_due": maintenance_requested
+                or previous.get("maintenance_due") is True,
             }
         elif status["status"] == "error":
             status = {
@@ -1549,6 +1554,7 @@ def run_cloud_maintenance(
     agent: CloudAgent | None = None,
     now: datetime | None = None,
     force_agent: bool = False,
+    maintenance_requested: bool = True,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     try:
@@ -1584,7 +1590,9 @@ def run_cloud_maintenance(
             "reason": error.reason,
             "checked_at": checked_at.isoformat(),
         }
-        _record_cloud_status(settings, result)
+        _record_cloud_status(
+            settings, result, maintenance_requested=maintenance_requested
+        )
         return result
 
 
@@ -1623,6 +1631,26 @@ def run_cloud_reconcile(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Publish an offline stage or retry previously deferred maintenance."""
+    checked_at = now or datetime.now(UTC)
+    try:
+        # Admission, cooldown inspection, and the final record are one operation.
+        # A contender must not save an older view over the owner's result.
+        with MachineProcessLock(settings.lock_dir / "cloud-reconnect.lock"):
+            return _run_cloud_reconcile(settings, client=client, now=checked_at)
+    except LeaseBusy as error:
+        return {
+            "status": "deferred",
+            "reason": error.reason,
+            "checked_at": checked_at.isoformat(),
+        }
+
+
+def _run_cloud_reconcile(
+    settings: Settings,
+    *,
+    client: SyncClient | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     staged = _load_staged_report(settings)
     try:
@@ -1688,6 +1716,7 @@ def run_cloud_reconcile(
             settings,
             client=active_client,
             now=checked_at,
+            maintenance_requested=maintenance_due,
         )
     except Exception:
         save_event(
