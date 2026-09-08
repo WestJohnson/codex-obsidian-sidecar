@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+import sys
 import tarfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, local
 
@@ -1713,3 +1714,304 @@ def test_publication_deferral_preserves_existing_nightly_obligation(settings):
     )
     assert load_event(path)["maintenance_due"] is True
     assert load_event(path)["failure"] == "RuntimeError"
+
+
+@pytest.mark.parametrize("change", ["source", "deleted-source", "task"])
+@pytest.mark.parametrize("transition", ["convergence", "offline", "maintenance"])
+def test_publication_rechecks_fingerprints_inside_transaction(
+    settings, tmp_path, monkeypatch, change, transition
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    source = configured.vault_path / "project.md"
+    source.write_text("# Project\nOriginal source.\n")
+    task = configured.vault_path / "_System/Cloud Tasks/Pending/review.md"
+    if change == "task":
+        task.parent.mkdir(parents=True)
+        task.write_text(
+            "---\ntitle: Review links\ntype: cloud-task\nstatus: pending\n---\n"
+            "Review project links.\n"
+        )
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    run_cloud_maintenance(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        agent=agent,
+        now=NOW,
+    )
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    stage = stage_path.read_bytes()
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(status_path, {"status": "error", "failure": "RuntimeError"})
+
+    def change_replica():
+        if change == "deleted-source":
+            source.unlink()
+        else:
+            target = task if change == "task" else source
+            target.write_text(target.read_text() + "Changed after admission.\n")
+        save_event(
+            status_path,
+            {**load_event(status_path), "maintenance_due": True},
+        )
+
+    class RacingSync(FakeSync):
+        snapshots = 0
+
+        def snapshot(self):
+            self.snapshots += 1
+            if transition == "offline" and self.snapshots == 2:
+                change_replica()
+                self.value = replace(self.value, peer_connected=False)
+            return super().snapshot()
+
+        def wait_healthy(self, timeout_seconds):
+            if transition == "convergence" and self.waits == 0:
+                change_replica()
+            return super().wait_healthy(timeout_seconds)
+
+    if transition == "maintenance":
+        maintain = cloud.run_maintenance
+
+        def maintenance_changes_replica(*args, **kwargs):
+            result = maintain(*args, **kwargs)
+            change_replica()
+            return result
+
+        monkeypatch.setattr(cloud, "run_maintenance", maintenance_changes_replica)
+
+    result = run_cloud_reconcile(configured, client=RacingSync(), now=NOW)
+    assert result["status"] == "stale-stage"
+    assert stage_path.read_bytes() == stage
+    assert agent.calls == 1
+    assert not (configured.vault_path / "_System/Cloud Reports/latest.md").exists()
+    assert not (configured.state_dir / "cloud-state.json").exists()
+    assert task.exists() is (change == "task")
+    state = load_event(status_path)
+    assert state["status"] == "deferred"
+    assert state["failure"] == "RuntimeError"
+    assert state["maintenance_due"] is True
+    reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert "last_success_at" not in reconnect
+    if transition != "maintenance":
+        assert "last_attempt_at" not in reconnect
+        assert not (configured.state_dir / "maintenance-success.json").exists()
+
+
+@pytest.mark.parametrize("disconnect_at", ["admission", "convergence"])
+def test_publication_connectivity_loss_preserves_stage_and_failure(
+    settings, tmp_path, monkeypatch, disconnect_at
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    run_cloud_maintenance(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        agent=agent,
+        now=NOW,
+    )
+    stage_path = configured.state_dir / "cloud-staged-report.json"
+    stage = stage_path.read_bytes()
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(status_path, {"status": "error", "failure": "RuntimeError"})
+
+    class DisconnectingSync(FakeSync):
+        snapshots = 0
+
+        def disconnect(self):
+            self.value = replace(self.value, peer_connected=False)
+            save_event(
+                status_path,
+                {**load_event(status_path), "maintenance_due": True},
+            )
+
+        def snapshot(self):
+            self.snapshots += 1
+            if disconnect_at == "admission" and self.snapshots == 2:
+                self.disconnect()
+            return super().snapshot()
+
+        def wait_healthy(self, timeout_seconds):
+            self.disconnect()
+            return super().wait_healthy(timeout_seconds)
+
+    if disconnect_at == "convergence":
+        with pytest.raises(RuntimeError, match="did not converge"):
+            run_cloud_reconcile(configured, client=DisconnectingSync(), now=NOW)
+    else:
+        result = run_cloud_reconcile(configured, client=DisconnectingSync(), now=NOW)
+        assert result["status"] == "waiting-for-peer"
+    assert agent.calls == 1
+    assert stage_path.read_bytes() == stage
+    state = load_event(status_path)
+    assert state["status"] != "ok"
+    assert state["maintenance_due"] is True
+    assert state["failure"] == "RuntimeError"
+    reconnect = load_event(configured.state_dir / "cloud-reconnect-state.json")
+    assert "last_success_at" not in reconnect
+    assert not (configured.state_dir / "maintenance-success.json").exists()
+
+
+def test_publication_only_force_agent_still_uses_validated_stage(settings, tmp_path):
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    agent = FakeAgent()
+    run_cloud_maintenance(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        agent=agent,
+        now=NOW,
+    )
+    result = run_cloud_maintenance(
+        configured,
+        client=FakeSync(),
+        agent=agent,
+        now=NOW,
+        force_agent=True,
+        maintenance_requested=False,
+    )
+    assert result["status"] == "ok"
+    assert result["agent"]["reason"].startswith("published validated offline")
+    assert agent.calls == 1
+
+
+@pytest.mark.parametrize("interrupted_at", ["backup", "analysis"])
+def test_offline_reconnect_crash_persists_admission_cooldown(
+    settings, tmp_path, monkeypatch, interrupted_at
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    status_path = configured.state_dir / "cloud-maintenance-status.json"
+    save_event(
+        status_path,
+        {"status": "deferred", "maintenance_due": True, "failure": "RuntimeError"},
+    )
+    config_path = tmp_path / "config.json"
+    save_event(config_path, configured.public_dict())
+    script = """
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+from obsidian_sidecar import cloud, maintenance
+from obsidian_sidecar.config import load_settings
+from obsidian_sidecar.queueing import load_event, save_event
+
+settings = load_settings(Path(sys.argv[1]))
+maintenance.basic_memory_binary = lambda: None
+maintenance._command_status = lambda *_: "unavailable"
+
+class OfflineSync:
+    def snapshot(self):
+        return cloud.SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)
+
+def interrupt(*args, **kwargs):
+    receipt = settings.state_dir / "cloud-reconnect-state.json"
+    save_event(settings.state_dir / "interrupted.json", {
+        "phase": sys.argv[3],
+        "receipt": load_event(receipt) if receipt.exists() else None,
+    })
+    os._exit(23)
+
+class InterruptedAgent:
+    analyze = staticmethod(interrupt)
+
+cloud.OpenRouterCloudAgent = lambda _: InterruptedAgent()
+if sys.argv[3] == "backup":
+    cloud.create_cloud_backup = interrupt
+cloud.run_cloud_reconcile(
+    settings, client=OfflineSync(), now=datetime.fromisoformat(sys.argv[2])
+)
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(config_path), NOW.isoformat(), interrupted_at],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert child.returncode == 23, child.stderr
+    interrupted = load_event(configured.state_dir / "interrupted.json")
+    receipt = interrupted["receipt"]
+    assert receipt["last_attempt_at"] == NOW.isoformat()
+    assert receipt["status"] == "running"
+    reconnect_path = configured.state_dir / "cloud-reconnect-state.json"
+    assert load_event(reconnect_path) == receipt
+    assert not (configured.state_dir / "cloud-staged-report.json").exists()
+    assert load_event(status_path)["maintenance_due"] is True
+    assert load_event(status_path)["failure"] == "RuntimeError"
+
+    class NoSync(FakeSync):
+        def snapshot(self):
+            pytest.fail("cooldown must precede sync work")
+
+    limited = run_cloud_reconcile(
+        configured, client=NoSync(), now=NOW + timedelta(minutes=5)
+    )
+    assert limited["status"] == "rate-limited"
+    assert limited["retry_after_seconds"] == 300
+    assert load_event(reconnect_path) == receipt
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    recovered = run_cloud_reconcile(
+        configured,
+        client=FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", False)),
+        now=NOW + timedelta(minutes=10),
+    )
+    assert recovered["status"] == "offline-staged"
+    assert agent.calls == 1
+    state = load_event(reconnect_path)
+    assert state["last_attempt_at"] == (NOW + timedelta(minutes=10)).isoformat()
+    assert state["status"] == "offline-staged"
+    assert not load_event(status_path).get("maintenance_due")
+    assert not load_event(status_path).get("failure")
+
+
+@pytest.mark.parametrize("contention", ["writer", "cloud", "maintenance", "reconnect"])
+@pytest.mark.parametrize("connected", [True, False])
+def test_reconnect_contention_preserves_prior_admission_receipt(
+    settings, tmp_path, monkeypatch, contention, connected
+):
+    from obsidian_sidecar import cloud
+    from obsidian_sidecar.queueing import load_event, save_event
+
+    configured = cloud_settings(settings, tmp_path)
+    (configured.vault_path / "project.md").write_text("# Project\n")
+    save_event(
+        configured.state_dir / "cloud-maintenance-status.json",
+        {"status": "deferred", "maintenance_due": True},
+    )
+    state_path = configured.state_dir / "cloud-reconnect-state.json"
+    prior = {"last_attempt_at": (NOW - timedelta(minutes=20)).isoformat()}
+    save_event(state_path, prior)
+    locks = {
+        "writer": LocalWriterLease(configured.vault_path, ttl_seconds=600),
+        "cloud": CloudLease(configured.vault_path, ttl_seconds=600),
+        "maintenance": MachineProcessLock(
+            configured.lock_dir / "cloud-maintenance.lock"
+        ),
+        "reconnect": MachineProcessLock(configured.lock_dir / "cloud-reconnect.lock"),
+    }
+    agent = FakeAgent()
+    monkeypatch.setattr(cloud, "OpenRouterCloudAgent", lambda _: agent)
+    sync = FakeSync(SyncSnapshot("idle", 0, 0, 0, 100, "valid", connected))
+    with locks[contention]:
+        result = run_cloud_reconcile(configured, client=sync, now=NOW)
+        assert result["status"] == "deferred"
+        assert load_event(state_path)["last_attempt_at"] == prior["last_attempt_at"]
+        assert agent.calls == 0
+        assert not list(configured.cloud_backup_dir.glob("*.tar.gz"))
+    result = run_cloud_reconcile(configured, client=sync, now=NOW)
+    assert result["status"] == ("published" if connected else "offline-staged")
+    assert agent.calls == 1
+    assert load_event(state_path)["last_attempt_at"] == NOW.isoformat()

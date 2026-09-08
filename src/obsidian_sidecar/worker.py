@@ -344,6 +344,8 @@ def _process_ready(
             return summary
         recover_captures(settings)
         summary.reconciled_failed_events = reconcile_superseded_failures(settings)
+        if summary.reconciled_failed_events:
+            _record_processing_outcome(settings, summary)
         groups = ready_groups(settings, force=force)
         summary.groups_seen = len(groups)
         retry_index = settings.runtime_role == "local" and indexing_problem(settings)

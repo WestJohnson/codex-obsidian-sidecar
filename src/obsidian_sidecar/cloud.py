@@ -1208,6 +1208,14 @@ def _check_cloud_contention(before: dict[str, Any]) -> None:
             raise LeaseBusy(path, before[key]["reason"])
 
 
+def _stale_stage_result(checked_at: datetime) -> dict[str, Any]:
+    return {
+        "status": "stale-stage",
+        "checked_at": checked_at.isoformat(),
+        "reason": "source or task fingerprints changed; nightly maintenance must recompute",
+    }
+
+
 def _run_offline_cloud_analysis(
     settings: Settings,
     *,
@@ -1215,6 +1223,8 @@ def _run_offline_cloud_analysis(
     agent: CloudAgent | None,
     checked_at: datetime,
     force_agent: bool,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     before = cloud_doctor(settings, client=client)
     _check_cloud_contention(before)
@@ -1222,6 +1232,22 @@ def _run_offline_cloud_analysis(
         raise RuntimeError(f"offline cloud preflight failed: {json.dumps(before)}")
     if not settings.cloud_backup_dir:
         raise ValueError("cloud_backup_dir is required for cloud maintenance")
+
+    if not maintenance_requested:
+        current_snapshot, _ = source_snapshot(settings.vault_path)
+        _, task_paths = load_cloud_tasks(settings)
+        task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+        if not _staged_report_matches(
+            _load_staged_report(settings), current_snapshot, task_fingerprints
+        ):
+            return _stale_stage_result(checked_at)
+        return {
+            "status": "waiting-for-peer",
+            "checked_at": checked_at.isoformat(),
+            "reason": "matching offline analysis is waiting for peer reconnection",
+        }
+    if on_admitted is not None:
+        on_admitted()
 
     health = inspect_vault(settings, create_layout=False)
     if health.critical_failures:
@@ -1335,6 +1361,8 @@ def _run_connected_cloud_maintenance(
     agent: CloudAgent | None = None,
     now: datetime | None = None,
     force_agent: bool = False,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
@@ -1373,6 +1401,23 @@ def _run_connected_cloud_maintenance(
         if not settled.healthy:
             raise RuntimeError("cloud lease did not converge to the peer")
 
+        if not maintenance_requested:
+            current_snapshot, _ = source_snapshot(settings.vault_path)
+            _, task_paths = load_cloud_tasks(settings)
+            task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+            if not _staged_report_matches(
+                _load_staged_report(settings), current_snapshot, task_fingerprints
+            ):
+                return _stale_stage_result(checked_at)
+            if not settings.cloud_agent_enabled:
+                return {
+                    "status": "deferred",
+                    "checked_at": checked_at.isoformat(),
+                    "reason": "cloud agent disabled",
+                }
+        if on_admitted is not None:
+            on_admitted()
+
         backup = create_cloud_backup(
             settings.vault_path,
             settings.cloud_backup_dir,
@@ -1392,6 +1437,12 @@ def _run_connected_cloud_maintenance(
         current_snapshot, excluded_secrets = source_snapshot(settings.vault_path)
         tasks, task_paths = load_cloud_tasks(settings)
         task_fingerprints = _task_fingerprints(task_paths, settings.vault_path)
+        staged = _load_staged_report(settings)
+        staged_matches = _staged_report_matches(
+            staged, current_snapshot, task_fingerprints
+        )
+        if not maintenance_requested and not staged_matches:
+            return _stale_stage_result(checked_at)
         previous_snapshot = _load_state(settings).get("source_snapshot", {})
         changed_paths = sorted(
             path
@@ -1405,12 +1456,12 @@ def _run_connected_cloud_maintenance(
             "changed_paths": changed_paths,
             "deleted_paths": deleted_paths,
         }
-        staged = _load_staged_report(settings)
-        staged_matches = _staged_report_matches(
-            staged, current_snapshot, task_fingerprints
-        )
         remove_staged = False
-        if settings.cloud_agent_enabled and staged_matches and not force_agent:
+        if (
+            settings.cloud_agent_enabled
+            and staged_matches
+            and (not force_agent or not maintenance_requested)
+        ):
             report = staged["report"]
             dated, latest = write_agent_report(
                 settings,
@@ -1555,6 +1606,7 @@ def run_cloud_maintenance(
     now: datetime | None = None,
     force_agent: bool = False,
     maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     try:
@@ -1566,6 +1618,8 @@ def run_cloud_maintenance(
                     agent=agent,
                     now=checked_at,
                     force_agent=force_agent,
+                    maintenance_requested=maintenance_requested,
+                    on_admitted=on_admitted,
                 )
             except LeaseBusy:
                 raise
@@ -1580,8 +1634,18 @@ def run_cloud_maintenance(
                     },
                 )
                 raise
+            completed = result["status"] == "ok" or (
+                maintenance_requested
+                and result["status"] in {"offline-staged", "offline-read-only"}
+            )
             _record_cloud_status(
-                settings, {"status": "ok", "checked_at": checked_at.isoformat()}
+                settings,
+                {
+                    "status": "ok" if completed else "deferred",
+                    "checked_at": checked_at.isoformat(),
+                    **({} if completed else {"reason": result.get("reason")}),
+                },
+                maintenance_requested=maintenance_requested,
             )
             return result
     except LeaseBusy as error:
@@ -1603,6 +1667,8 @@ def _run_cloud_maintenance(
     agent: CloudAgent | None = None,
     now: datetime | None = None,
     force_agent: bool = False,
+    maintenance_requested: bool = True,
+    on_admitted: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     checked_at = now or datetime.now(UTC)
     active_client = client or SyncthingClient.from_settings(settings)
@@ -1614,6 +1680,8 @@ def _run_cloud_maintenance(
             agent=agent,
             checked_at=checked_at,
             force_agent=force_agent,
+            maintenance_requested=maintenance_requested,
+            on_admitted=on_admitted,
         )
     return _run_connected_cloud_maintenance(
         settings,
@@ -1621,6 +1689,8 @@ def _run_cloud_maintenance(
         agent=agent,
         now=checked_at,
         force_agent=force_agent,
+        maintenance_requested=maintenance_requested,
+        on_admitted=on_admitted,
     )
 
 
@@ -1705,11 +1775,17 @@ def _run_cloud_reconcile(
     if not maintenance_due and not _staged_report_matches(
         staged, current_snapshot, task_fingerprints
     ):
-        return {
-            "status": "stale-stage",
-            "checked_at": checked_at.isoformat(),
-            "reason": "source or task fingerprints changed; nightly maintenance must recompute",
-        }
+        return _stale_stage_result(checked_at)
+
+    attempt = dict(prior)
+
+    def record_admission() -> None:
+        attempt.update(
+            schema=1,
+            last_attempt_at=checked_at.isoformat(),
+            status="running",
+        )
+        save_event(state_path, attempt)
 
     try:
         result = run_cloud_maintenance(
@@ -1717,12 +1793,13 @@ def _run_cloud_reconcile(
             client=active_client,
             now=checked_at,
             maintenance_requested=maintenance_due,
+            on_admitted=record_admission,
         )
     except Exception:
         save_event(
             state_path,
             {
-                **prior,
+                **attempt,
                 "schema": 1,
                 "last_attempt_at": checked_at.isoformat(),
                 "status": "error",
@@ -1733,7 +1810,7 @@ def _run_cloud_reconcile(
         save_event(
             state_path,
             {
-                **prior,
+                **attempt,
                 "schema": 1,
                 "checked_at": checked_at.isoformat(),
                 "status": result.get("status", "unknown"),

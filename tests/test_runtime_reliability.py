@@ -1443,6 +1443,94 @@ def test_manual_processing_recovery_resolves_only_recovered_failure(
         assert load_event(path)["failure"]["backup"]
 
 
+@pytest.mark.parametrize("remaining", ["none", "failed", "queued", "empty-recovery"])
+@pytest.mark.parametrize("backup_failure", [False, True])
+def test_reconciliation_receipt_survives_busy_writer_and_idle_index_recovery(
+    settings, transcript_path, valid_curation, monkeypatch, remaining, backup_failure
+):
+    from obsidian_sidecar import maintenance, worker
+    from obsidian_sidecar.queueing import processing_status, runtime_problem
+
+    index_calls = []
+
+    def index(*args, **kwargs):
+        index_calls.append(True)
+        return "error" if len(index_calls) == 1 else "ok"
+
+    monkeypatch.setattr(maintenance, "_reindex_basic_memory", index)
+    monkeypatch.setattr(worker, "_maintenance_due", lambda _: False)
+    monkeypatch.setattr(
+        worker, "CodexLunaCurator", lambda _: StaticCurator(valid_curation)
+    )
+    event = {
+        "session_id": "fixture-session-001",
+        "transcript_path": str(transcript_path),
+        "captured_at": "2026-07-14T08:01:00Z",
+    }
+    enqueue_event(settings, event)
+    first = daemon_once(settings)
+    assert first["processing"]["processed_events"] == 1
+    assert first["processing"]["reindex_result"] == "error"
+    covered = settings.failed_dir / "covered.json"
+    if remaining != "empty-recovery":
+        save_event(covered, {**event, "attempts": 3, "last_error": "fixture failure"})
+    if remaining in {"failed", "queued"}:
+        directory = (
+            settings.failed_dir if remaining == "failed" else settings.queue_dir
+        )
+        save_event(
+            directory / "unresolved.json",
+            {"session_id": "unrecovered", "last_error": "fixture failure"},
+        )
+    settings = replace(settings, debounce_seconds=3600)
+    receipt_path = settings.state_dir / "processing-status.json"
+    save_event(receipt_path, {"schema": 1, "status": "error"})
+    state_path = settings.state_dir / "worker-status.json"
+    failures = {"processing": "failed", "indexing": "failed"}
+    if backup_failure:
+        failures["backup"] = "failed"
+    save_event(
+        state_path,
+        {
+            "checked_at": datetime.now(UTC).isoformat(),
+            "status": "error",
+            "failure": failures,
+        },
+    )
+
+    with LocalWriterLease(settings.vault_path, ttl_seconds=600):
+        deferred = daemon_once(settings)
+        assert deferred["processing"]["deferred_reason"] == "local-writer-active"
+        assert not covered.exists()
+        assert processing_status(settings) == (
+            "ok" if remaining == "none" else "error"
+        )
+        assert len(index_calls) == 1
+        assert (
+            load_event(settings.state_dir / "index-status.json")["status"] == "error"
+        )
+        assert load_event(state_path)["failure"]["indexing"] == "failed"
+        assert runtime_problem(settings) == "worker-error"
+        if backup_failure:
+            assert load_event(state_path)["failure"]["backup"] == "failed"
+
+    result = daemon_once(settings)
+    assert result["processing"]["groups_seen"] == 0
+    assert result["processing"]["reconciled_failed_events"] == 0
+    assert result["processing"]["reindex_result"] == "ok"
+    assert len(index_calls) == 2
+    assert processing_status(settings) == ("ok" if remaining == "none" else "error")
+    expected_failures = {}
+    if remaining != "none":
+        expected_failures["processing"] = "failed"
+    if backup_failure:
+        expected_failures["backup"] = "failed"
+    assert load_event(state_path)["failure"] == expected_failures
+    assert runtime_problem(settings) == ("worker-error" if expected_failures else None)
+    assert (settings.failed_dir / "unresolved.json").exists() is (remaining == "failed")
+    assert (settings.queue_dir / "unresolved.json").exists() is (remaining == "queued")
+
+
 @pytest.mark.parametrize("supplied_identity", [False, True])
 def test_long_session_header_recovers_routing_without_retaining_instructions(
     transcript_path, supplied_identity
