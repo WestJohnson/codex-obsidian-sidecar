@@ -89,9 +89,17 @@ def test_capture_recovers_only_exact_session(
     assert recover_captures(settings) == 0
 
 
-@pytest.mark.parametrize("mismatch", ["session", "cwd", "ambiguous", "symlink"])
+@pytest.mark.parametrize(
+    "mismatch",
+    [
+        "session", "cwd", "ambiguous", "symlink", "directory-symlink",
+        "archived-directory-symlink",
+    ],
+)
 def test_capture_does_not_guess(settings, monkeypatch, tmp_path, mismatch):
     root = incomplete_hook(settings, monkeypatch, tmp_path)
+    pending = next(settings.capture_pending_dir.glob("*.json"))
+    original_capture = pending.read_bytes()
     if mismatch == "session":
         make_transcript(root, session="different")
     elif mismatch == "cwd":
@@ -99,12 +107,38 @@ def test_capture_does_not_guess(settings, monkeypatch, tmp_path, mismatch):
     elif mismatch == "ambiguous":
         make_transcript(root)
         make_transcript(root, directory="archived_sessions")
-    else:
+    elif mismatch == "symlink":
         outside = make_transcript(tmp_path / "outside")
         (root / "sessions").mkdir(parents=True)
         (root / "sessions" / outside.name).symlink_to(outside)
-    assert recover_captures(settings) == 0
+    else:
+        outside = make_transcript(tmp_path / "outside")
+        root.mkdir()
+        directory = (
+            "archived_sessions" if mismatch == "archived-directory-symlink" else "sessions"
+        )
+        (root / directory).symlink_to(outside.parent, target_is_directory=True)
+    recovered = recover_captures(settings)
+    if mismatch == "directory-symlink" and os.environ.get("SIDECAR_TEST_EVIDENCE_DIR"):
+        evidence_dir = Path(os.environ["SIDECAR_TEST_EVIDENCE_DIR"])
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        evidence = {
+            "scope": "Synthetic external transcript behind a sessions directory symlink",
+            "recorded_codex_home": str(root),
+            "sessions_resolved_to": str((root / "sessions").resolve()),
+            "expected_recovered_count": 0,
+            "actual_recovered_count": recovered,
+            "queued_events": [
+                load_event(path) for path in settings.queue_dir.glob("*.json")
+            ],
+        }
+        (evidence_dir / "capture-directory-symlink.json").write_text(
+            json.dumps(evidence, indent=2).replace(str(tmp_path), "<TEST_ROOT>")
+            + "\n"
+        )
+    assert recovered == 0
     assert not list(settings.queue_dir.glob("*.json"))
+    assert pending.read_bytes() == original_capture
 
 
 def test_unresolved_capture_becomes_visible_not_discarded(

@@ -133,9 +133,12 @@ def _find_transcript(event: dict[str, Any]) -> Path | None:
     root = Path(event.get("codex_home") or _codex_home()).expanduser().resolve()
     matches: set[Path] = set()
     for directory in (root / "sessions", root / "archived_sessions"):
+        session_root = directory.resolve()
+        if not session_root.is_relative_to(root):
+            continue
         for path in directory.rglob(f"*{session_id}.jsonl"):
             resolved = path.resolve()
-            if not resolved.is_relative_to(directory.resolve()):
+            if not resolved.is_relative_to(session_root):
                 continue
             try:
                 with resolved.open(encoding="utf-8") as handle:
