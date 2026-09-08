@@ -925,6 +925,7 @@ def test_idle_tick_recovers_indexing_after_queue_retirement_crash(
 ):
     from obsidian_sidecar import maintenance, worker
     from obsidian_sidecar.checkpoints import load_checkpoint
+    from obsidian_sidecar.queueing import processing_status
 
     state = settings.state_dir / "index-status.json"
     save_event(state, {"status": prior_status, "full": prior_full})
@@ -944,6 +945,14 @@ def test_idle_tick_recovers_indexing_after_queue_retirement_crash(
             "captured_at": "2026-07-14T08:01:00Z",
         },
     )
+    class Failure:
+        def curate(self, _packet):
+            raise RuntimeError("fixture processing failure before recovery")
+
+    monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: Failure())
+    assert daemon_once(settings)["processing"]["failed"] == 1
+    assert processing_status(settings) == "error"
+    save_event(state, {"status": prior_status, "full": prior_full})
     curations = []
     notes = []
     index_calls = []
@@ -999,7 +1008,284 @@ def test_idle_tick_recovers_indexing_after_queue_retirement_crash(
     assert load_checkpoint(settings, "fixture-session-001") == checkpoint
     assert notes[0].read_bytes() == note_before
     assert load_event(state)["status"] == "ok"
+    assert processing_status(settings) == "ok"
     assert load_event(settings.state_dir / "worker-status.json")["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "crash_at", ["before-move", "after-move", "retirement", "index"]
+)
+@pytest.mark.parametrize("checkpoint_enabled", [False, True])
+@pytest.mark.parametrize("unresolved", [None, "queue", "failed"])
+def test_completed_capture_survives_process_exit_without_recuration(
+    settings,
+    transcript_path,
+    valid_curation,
+    monkeypatch,
+    tmp_path,
+    crash_at,
+    checkpoint_enabled,
+    unresolved,
+):
+    from obsidian_sidecar import coordination, maintenance, worker
+    from obsidian_sidecar.checkpoints import load_checkpoint
+    from obsidian_sidecar.queueing import processing_status
+
+    settings = replace(settings, checkpoint_enabled=checkpoint_enabled)
+    paths = [
+        enqueue_event(
+            settings,
+            {
+                "session_id": "fixture-session-001",
+                "transcript_path": str(transcript_path),
+                "captured_at": "2026-07-14T08:01:00Z",
+                "turn_id": f"turn-{index}",
+            },
+        )
+        for index in range(2)
+    ]
+
+    class Failure:
+        def curate(self, _packet):
+            raise RuntimeError("fixture processing failure before recovery")
+
+    monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: Failure())
+    monkeypatch.setattr(worker, "_maintenance_due", lambda _: False)
+    assert daemon_once(settings)["processing"]["failed"] == 1
+    assert processing_status(settings) == "error"
+    settings = replace(settings, debounce_seconds=3600)
+    worker_path = settings.state_dir / "worker-status.json"
+    prior = load_event(worker_path)
+    prior["failure"].update(backup="failed", indexing="failed", tick="failed")
+    save_event(worker_path, prior)
+    index_path = settings.state_dir / "index-status.json"
+    save_event(index_path, {"status": "error", "full": True})
+    config_path, curation_path = tmp_path / "config.json", tmp_path / "curation.json"
+    save_event(config_path, settings.public_dict())
+    save_event(curation_path, valid_curation)
+    child = """
+import json
+import os
+import sys
+from pathlib import Path
+from obsidian_sidecar import maintenance, worker
+from obsidian_sidecar.config import load_settings
+from obsidian_sidecar.queueing import save_event
+
+settings = load_settings(Path(sys.argv[1]))
+curation = json.loads(Path(sys.argv[2]).read_text())
+crash_at = sys.argv[3]
+maintenance.basic_memory_binary = lambda: None
+maintenance._command_status = lambda *_: "unavailable"
+
+class Curator:
+    calls = 0
+
+    def curate(self, packet):
+        self.calls += 1
+        save_event(settings.state_dir / "curation-calls.json", {"calls": self.calls})
+        return curation
+
+move = worker.move_event
+def interrupt_move(*args, **kwargs):
+    if crash_at == "before-move":
+        os._exit(23)
+    result = move(*args, **kwargs)
+    if crash_at == "after-move":
+        os._exit(23)
+    return result
+
+retire = worker._retire_covered_events
+def interrupt_retirement(*args, **kwargs):
+    result = retire(*args, **kwargs)
+    if crash_at == "retirement":
+        os._exit(23)
+    return result
+
+def index(*args, **kwargs):
+    if crash_at == "index":
+        os._exit(23)
+    return "ok"
+
+worker.move_event = interrupt_move
+worker._retire_covered_events = interrupt_retirement
+maintenance._reindex_basic_memory = index
+worker.process_ready(settings, force=True, curator=Curator())
+"""
+    process = subprocess.run(
+        [sys.executable, "-c", child, str(config_path), str(curation_path), crash_at],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert process.returncode == 23, process.stderr
+    assert sum(path.exists() for path in paths) == {
+        "before-move": 2,
+        "after-move": 1,
+        "retirement": 0,
+        "index": 0,
+    }[crash_at]
+    journal_path = settings.state_dir / "processing-completion.json"
+    pending_retirement = crash_at in {"before-move", "after-move"}
+    assert journal_path.exists() is pending_retirement
+    if pending_retirement:
+        journal = load_event(journal_path)
+        assert set(journal) == {"schema", "checked_at", "events"}
+        assert journal["schema"] == 1
+        assert len(journal["events"]) == 2
+        for entry in journal["events"]:
+            assert set(entry) == {"directory", "name", "sha256"}
+            assert entry["directory"] == "queue"
+            assert entry["name"] in {path.name for path in paths}
+            assert len(entry["sha256"]) == 64
+        assert journal_path.stat().st_mode & 0o777 == 0o600
+    assert processing_status(settings) == ("error" if pending_retirement else "ok")
+    assert load_event(index_path)["status"] == (
+        "running" if crash_at == "index" else "pending"
+    )
+    checkpoint = load_checkpoint(settings, "fixture-session-001")
+    assert bool(checkpoint) is checkpoint_enabled
+    notes = {path: path.read_bytes() for path in settings.vault_path.rglob("*.md")}
+    assert notes
+    if unresolved:
+        save_event(
+            settings.state_dir / unresolved / "unresolved.json",
+            {
+                "session_id": "other-session",
+                "last_error": "fixture unresolved failure",
+            },
+        )
+    later = datetime.now(UTC) + timedelta(hours=2)
+
+    class ExpiredLeaseClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return later if tz is not None else later.replace(tzinfo=None)
+
+    monkeypatch.setattr(coordination, "datetime", ExpiredLeaseClock)
+
+    class NoCuration:
+        def curate(self, _packet):
+            pytest.fail("completed captures must recover without another model call")
+
+    index_calls = []
+
+    def index(_settings, *, full=False):
+        index_calls.append(full)
+        return "ok"
+
+    monkeypatch.setattr(worker, "CodexLunaCurator", lambda _: NoCuration())
+    monkeypatch.setattr(maintenance, "_reindex_basic_memory", index)
+    result = process_ready(settings)
+    assert result.groups_seen == 0
+    assert result.recovered_completed_events == (2 if pending_retirement else 0)
+    assert result.reindex_result == "ok"
+    assert index_calls == [True]
+    assert not journal_path.exists()
+    assert all(not path.exists() for path in paths)
+    assert len(list(settings.processed_dir.glob("*.json"))) == 2
+    assert processing_status(settings) == ("error" if unresolved else "ok")
+    assert load_event(worker_path) == prior
+    assert load_event(index_path)["status"] == "ok"
+    assert load_checkpoint(settings, "fixture-session-001") == checkpoint
+    assert {path: path.read_bytes() for path in notes} == notes
+    assert load_event(settings.state_dir / "curation-calls.json") == {"calls": 1}
+    daemon_once(settings)
+    expected_failures = {"backup": "failed"}
+    if unresolved:
+        expected_failures["processing"] = "failed"
+        assert (settings.state_dir / unresolved / "unresolved.json").exists()
+    assert load_event(worker_path)["failure"] == expected_failures
+    assert index_calls == [True]
+
+
+@pytest.mark.parametrize("problem", ["empty", "missing", "changed", "unsafe-path"])
+def test_completion_recovery_requires_exact_durable_evidence(settings, problem):
+    import hashlib
+    from obsidian_sidecar.queueing import processing_status
+
+    original = settings.queue_dir / "capture.json"
+    save_event(original, {"last_error": "unresolved fixture failure"})
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
+    if problem == "missing":
+        original.unlink()
+    elif problem == "changed":
+        save_event(original, {"last_error": "different unresolved fixture failure"})
+    name = "../capture.json" if problem == "unsafe-path" else original.name
+    journal_path = settings.state_dir / "processing-completion.json"
+    save_event(
+        journal_path,
+        {
+            "schema": 1,
+            "events": (
+                [] if problem == "empty"
+                else [{"directory": "queue", "name": name, "sha256": digest}]
+            ),
+        },
+    )
+    save_event(settings.state_dir / "processing-status.json", {"status": "error"})
+    before = journal_path.read_bytes()
+    captured = original.read_bytes() if original.exists() else None
+    with pytest.raises(ValueError, match="processing completion"):
+        process_ready(settings)
+    assert processing_status(settings) == "error"
+    assert journal_path.read_bytes() == before
+    assert (original.read_bytes() if original.exists() else None) == captured
+    assert not list(settings.processed_dir.glob("*.json"))
+
+
+@pytest.mark.parametrize("after_move", [False, True])
+def test_retirement_io_failure_retains_completion_proof(
+    settings, transcript_path, valid_curation, monkeypatch, after_move
+):
+    from obsidian_sidecar import maintenance, worker
+    from obsidian_sidecar.queueing import processing_status
+
+    event = enqueue_event(
+        settings,
+        {
+            "session_id": "fixture-session-001",
+            "transcript_path": str(transcript_path),
+            "captured_at": "2026-07-14T08:01:00Z",
+        },
+    )
+
+    class Failure:
+        def curate(self, _packet):
+            raise RuntimeError("fixture initial failure")
+
+    assert process_ready(settings, force=True, curator=Failure()).failed == 1
+    capture = event.read_bytes()
+    move = worker.move_event
+
+    def failing_move(*args, **kwargs):
+        if after_move:
+            move(*args, **kwargs)
+        raise OSError("fixture retirement interruption")
+
+    monkeypatch.setattr(worker, "move_event", failing_move)
+    with pytest.raises(OSError, match="fixture retirement interruption"):
+        process_ready(settings, force=True, curator=StaticCurator(valid_curation))
+    assert processing_status(settings) == "error"
+    preserved = settings.processed_dir / event.name if after_move else event
+    assert preserved.read_bytes() == capture
+    journal = settings.state_dir / "processing-completion.json"
+    assert journal.exists()
+
+    class NoCuration:
+        def curate(self, _packet):
+            pytest.fail("retirement I/O retry must not repeat curation")
+
+    monkeypatch.setattr(worker, "move_event", move)
+    monkeypatch.setattr(maintenance, "_reindex_basic_memory", lambda *a, **k: "ok")
+    result = process_ready(settings, curator=NoCuration())
+    assert result.groups_seen == 0
+    assert result.recovered_completed_events == 1
+    assert result.reindex_result == "ok"
+    assert processing_status(settings) == "ok"
+    assert not journal.exists()
+    assert not event.exists()
+    assert (settings.processed_dir / event.name).read_bytes() == capture
 
 
 def test_transcript_only_capture_uses_canonical_checkpoint(

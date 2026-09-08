@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import time
 from dataclasses import asdict, dataclass
@@ -55,6 +56,7 @@ class ProcessSummary:
     failed: int = 0
     processed_events: int = 0
     reconciled_failed_events: int = 0
+    recovered_completed_events: int = 0
     checkpoint_items_compacted: int = 0
     checkpoint_updates: int = 0
     checkpoint_chunks_pending: int = 0
@@ -231,6 +233,81 @@ def _coverage_boundaries(
     return boundaries
 
 
+def _recover_processing_completion(settings: Settings) -> int:
+    journal_path = settings.state_dir / "processing-completion.json"
+    try:
+        journal = load_event(journal_path)
+    except FileNotFoundError:
+        return 0
+    entries = journal.get("events")
+    if journal.get("schema") != 1 or not isinstance(entries, list) or not entries:
+        raise ValueError("invalid processing completion receipt")
+    transfers = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid processing completion entry")
+        directory, name, digest = (
+            entry.get("directory"), entry.get("name"), entry.get("sha256")
+        )
+        if (
+            directory not in ("queue", "failed")
+            or not isinstance(name, str)
+            or Path(name).name != name
+            or not name.endswith(".json")
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(char not in "0123456789abcdef" for char in digest)
+        ):
+            raise ValueError("invalid processing completion entry")
+        suffix = "superseded-by-checkpoint" if directory == "failed" else None
+        target_name = f"{Path(name).stem}--{suffix}.json" if suffix else name
+        source = settings.state_dir / directory / name
+        target = settings.processed_dir / target_name
+        source_matches = (
+            source.is_file()
+            and hashlib.sha256(source.read_bytes()).hexdigest() == digest
+        )
+        target_matches = (
+            target.is_file()
+            and hashlib.sha256(target.read_bytes()).hexdigest() == digest
+        )
+        if not source_matches and not target_matches:
+            raise ValueError("processing completion evidence is missing or changed")
+        if source_matches:
+            transfers.append((source, suffix))
+    for source, suffix in transfers:
+        move_event(source, settings.processed_dir, suffix)
+    _record_processing_outcome(
+        settings, ProcessSummary(recovered_completed_events=len(entries))
+    )
+    journal_path.unlink()
+    return len(entries)
+
+
+def _complete_events(paths: list[Path], settings: Settings) -> int:
+    if not paths:
+        return 0
+    journal_path = settings.state_dir / "processing-completion.json"
+    if journal_path.exists():
+        raise RuntimeError("unfinished processing completion receipt")
+    entries = []
+    for path in paths:
+        if path.parent not in (settings.queue_dir, settings.failed_dir):
+            raise ValueError("invalid processing completion source")
+        entries.append(
+            {
+                "directory": path.parent.name,
+                "name": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    save_event(
+        journal_path,
+        {"schema": 1, "checked_at": utc_now(), "events": entries},
+    )
+    return _recover_processing_completion(settings)
+
+
 def _retire_covered_events(
     paths: list[Path], settings: Settings, packet: dict[str, Any]
 ) -> int:
@@ -252,12 +329,11 @@ def _retire_covered_events(
             )
         if coverage is not None:
             covered.append(path)
-    _mark_group(covered, settings, "processed")
-    return len(covered)
+    return _complete_events(covered, settings)
 
 
 def reconcile_superseded_failures(settings: Settings) -> int:
-    reconciled = 0
+    covered = []
     events = {}
     for path in sorted(settings.failed_dir.glob("*.json")):
         try:
@@ -282,11 +358,10 @@ def reconcile_superseded_failures(settings: Settings) -> int:
                 **coverage,
             }
             save_event(path, event)
-            move_event(path, settings.processed_dir, "superseded-by-checkpoint")
-            reconciled += 1
+            covered.append(path)
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             continue
-    return reconciled
+    return _complete_events(covered, settings)
 
 
 def process_ready(
@@ -307,8 +382,12 @@ def _record_processing_outcome(
     # Called while worker.lock is held, so a stale observer cannot replace a
     # newer manual/daemon result. Empty or deferred ticks are not recovery.
     failed = bool(summary.failed) or any(settings.failed_dir.glob("*.json"))
-    did_work = bool(summary.groups_seen or summary.reconciled_failed_events)
-    if not failed and did_work:
+    did_work = bool(
+        summary.groups_seen
+        or summary.reconciled_failed_events
+        or summary.recovered_completed_events
+    )
+    if not failed:
         for path in settings.queue_dir.glob("*.json"):
             try:
                 if load_event(path).get("last_error"):
@@ -342,6 +421,7 @@ def _process_ready(
         if not lock.acquired:
             summary.deferred_reason = "local-worker-lock"
             return summary
+        summary.recovered_completed_events = _recover_processing_completion(settings)
         recover_captures(settings)
         summary.reconciled_failed_events = reconcile_superseded_failures(settings)
         if summary.reconciled_failed_events:
@@ -471,6 +551,8 @@ def _process_ready(
                         paths, settings, packet
                     )
                 except Exception as exc:
+                    if (settings.state_dir / "processing-completion.json").exists():
+                        raise
                     summary.failed += 1
                     _record_failure(paths, settings, exc)
             if summary.notes_written or retry_index:

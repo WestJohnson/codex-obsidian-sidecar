@@ -12,7 +12,12 @@ import pytest
 
 from obsidian_sidecar import maintenance, worker
 from obsidian_sidecar.checkpoints import load_checkpoint
-from obsidian_sidecar.queueing import enqueue_event, load_event, save_event
+from obsidian_sidecar.queueing import (
+    enqueue_event,
+    load_event,
+    processing_status,
+    save_event,
+)
 
 
 @pytest.mark.parametrize("previous_result", ["ok", "error"])
@@ -34,6 +39,14 @@ def test_index_completion_cannot_clear_later_capture_after_worker_crash(
             "captured_at": "2026-07-14T08:01:00Z",
         },
     )
+
+    class Failure:
+        def curate(self, _packet):
+            raise RuntimeError("fixture processing failure before recovery")
+
+    assert worker.process_ready(settings, force=True, curator=Failure()).failed == 1
+    assert processing_status(settings) == "error"
+    save_event(state_path, {"status": "error", "full": True})
     completing = Event()
     release_completion = Event()
     curated = Event()
@@ -108,6 +121,7 @@ def test_index_completion_cannot_clear_later_capture_after_worker_crash(
     assert load_checkpoint(settings, "fixture-session-001") == checkpoint
     assert {path: path.read_bytes() for path in notes} == notes
     assert load_event(state_path)["status"] == "ok"
+    assert processing_status(settings) == "ok"
 
 
 def test_indexing_from_another_process_waits_for_pending_vault_write(settings):
