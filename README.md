@@ -119,11 +119,11 @@ obsidian-sidecar knowledge-migrate  # read-only migration plan; add --apply
 
 ## Acceptance Standard
 
-The benchmark is scored out of 100. A pass requires at least 80 points and all
-critical safety gates. Live Codex, Basic Memory, hook trust, and
-background-service checks are reported separately so deterministic unit tests
-cannot masquerade as a working installation. Official Obsidian CLI search is
-required on macOS and optional on Linux; see [Testing](docs/TESTING.md).
+The [acceptance standard](docs/TESTING.md#acceptance-standard) defines a passing
+benchmark. Live Codex, Basic Memory, hook trust, and background-service checks
+are reported separately so deterministic unit tests cannot masquerade as a
+working installation. Platform requirements are defined in
+[Testing](docs/TESTING.md#live-suite).
 
 ## Documentation
 

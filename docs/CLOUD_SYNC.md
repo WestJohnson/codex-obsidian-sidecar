@@ -65,10 +65,12 @@ configuration, logs, or model packet.
 - An OS-level process lock serializes timer and manual runs on the VPS.
 - A shared cloud lease pauses the local sidecar. A shared local-writer lease
   blocks cloud maintenance. The cloud worker rechecks writers and conflicts
-  after the lease reaches the peer, closing the eventual-consistency race.
-  Malformed leases fail closed.
+  after the lease reaches the peer. The
+  [coordination contract](RUNTIME_RELIABILITY.md#operating-contract) defines
+  contention handling and the limits of this cooperative fencing.
 - The cloud run refuses pending sync bytes, folder errors, conflict copies,
-  active writers, apparent secrets, or critical vault-health failures.
+  apparent secrets, or critical vault-health failures; expected writer
+  contention follows that deferral contract.
 - Luna receives bounded note excerpts only. It has no filesystem tools and can
   only return strict JSON. Its output is rendered to `_System/Cloud Reports`;
   it cannot choose a path or modify a source note.
@@ -134,6 +136,8 @@ overnight compute without allowing disconnected replicas to mutate independently
 `obsidian-cloud-reconnect.timer` checks every five minutes with up to one minute
 of jitter. It exits immediately when no stage exists, waits without error while
 the peer is offline, and rate-limits publish attempts to one per ten minutes.
+Contention deferrals leave the stage intact and do not advance the publish
+attempt clock; a failed transaction still consumes the retry interval.
 It invokes the full fenced transaction only after Syncthing is healthy and the
 source/task fingerprints still match. A stale stage is left for the nightly
 transaction to discard and recompute rather than spending from a reconnect
@@ -242,13 +246,12 @@ recovery layers.
 
 ### Update The Cloud Runtime
 
-Run local tests first, then deploy and verify:
+Follow the [candidate upgrade and rollback procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback),
+including its idle-worker boundary, before the deployment commands below.
+Use the same checksummed candidate wheel accepted on the local hosts:
 
 ```sh
 cd ~/Documents/codex-obsidian-sidecar
-.venv/bin/pytest -q
-uv run --extra dev ruff check src tests
-uv run python scripts/export_release.py
 cd release
 shasum -a 256 -c SHA256SUMS
 cd ..

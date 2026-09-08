@@ -5,10 +5,12 @@
 The benchmark has 100 available points. Passing requires both:
 
 - a score of at least 80; and
-- every critical gate passing.
+- every case passing, including cases not marked critical.
 
-This prevents a high aggregate score from hiding a broken secret boundary,
-untrusted hook, unavailable retrieval layer, or failed live curation path.
+The `critical` flag still identifies safety gates in the report; it does not
+make other failures acceptable. This prevents a high aggregate score from
+hiding a failed check. The separate cloud benchmark retains its
+[cloud acceptance rule](#cloud-acceptance-score).
 
 ## Scored Cases
 
@@ -17,13 +19,13 @@ untrusted hook, unavailable retrieval layer, or failed live curation path.
 | Transcript boundary | 10 | Yes | Only user and final-answer content survives. |
 | Secret redaction | 10 | Yes | Multiple credential classes are removed. |
 | Grounding guard | 8 | Yes | Unknown evidence IDs are rejected. |
-| Queue batching | 4 | No | Multiple turns collapse into one session group. |
+| Queue batching | 4 | No | Multiple turns for the same session and transcript collapse into one group. |
 | Atomic idempotent write | 8 | Yes | A repeated session updates one note. |
 | Quarantine path | 5 | No | Invalid output is isolated safely. |
 | Vault doctor detection | 6 | No | Broken links and secrets reduce health. |
 | Git backup snapshot | 4 | No | A restorable local commit is created. |
 | Obsidian CLI search | 5 | Yes | On macOS, Obsidian finds a newly written note. On Linux without the official CLI, the case still passes and Basic Memory covers live retrieval. |
-| Basic Memory retrieval | 10 | Yes | Incremental indexing settles, then lexical and hybrid searches find a fixture. |
+| Basic Memory retrieval | 10 | Yes | [Search indexing](RUNTIME_RELIABILITY.md#search-indexing) completes, then lexical and hybrid searches find a fixture. |
 | Installed integration health | 5 | Yes | Stop hook is trusted, and the platform service manager is clean: launchd on macOS, or an enabled active user-systemd timer whose service last exited cleanly on Linux. |
 | Live Luna curation | 15 | Yes | Luna returns locally valid grounded output. |
 | Live complete pipeline | 10 | Yes | Capture through write, private checkpoint, and doctor succeeds. |
@@ -117,19 +119,37 @@ destructive cases. The official Obsidian CLI is required on macOS and optional
 on Linux. Search fixtures and the latest benchmark report are written under the
 live vault's `_System` directory.
 
+### Deferred Report Publication
+
+Results are saved privately to `benchmark-results/latest.json` under the
+configured state directory before the vault report is published. A busy lease
+sets `report_publication.status` to `deferred` without losing the case results.
+After contention clears, retry only publication:
+
+```sh
+obsidian-sidecar benchmark --publish-only
+```
+
+This preserves the original `ran_at`, cases, score, and pass/fail result without
+rerunning cases or making new curation calls. The command exits according to
+the saved acceptance result; inspect `report_publication.status` separately to
+confirm publication. Retrying publication is not new acceptance evidence.
+
 ## Release Checklist
 
 1. Run the deterministic suite.
 2. Build the wheel, source distribution, agent bundle, release manifest, and
    checksums with `uv run python scripts/export_release.py`.
 3. Run `uv run python scripts/smoke_release.py` against Python 3.11.
-4. Install with `uv tool install --force --no-cache --python 3.13 .`.
+4. Install the exact checksummed wheel from step 2 using the
+   [candidate upgrade procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback).
 5. Run the benchmark twice to detect state leakage and timing flakes.
 6. Run one real Codex turn and confirm `hook: Stop Completed`.
 7. Force-process the event and retrieve the note through Obsidian and Basic
    Memory.
 8. Run `doctor --backup` and require a score of at least 80 with zero critical
    failures.
-9. Kickstart the background service and require a clean exit: launchd on macOS,
-   or the user-systemd timer and service on Linux.
+9. Observe the background service and require the
+   [platform health checks](OPERATIONS.md#routine-checks). If a reload is needed,
+   follow [worker recovery](OPERATIONS.md#recovery).
 10. Verify release checksums, artifact secret scan, and build provenance.

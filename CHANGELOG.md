@@ -19,7 +19,8 @@
 - Detect Basic Memory 0.23's observation-only status and explicitly complete a
   search-only index pass. Do not mistake its compatibility `--wait` for index
   readiness. Keep desktop Obsidian CLI optional in Linux health checks.
-
+- Require every local benchmark case to pass and retain acceptance results
+  when report publication is deferred; allow publication to be retried alone.
 
 ## 0.6.3 - 2026-08-19
 

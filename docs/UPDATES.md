@@ -10,7 +10,8 @@ obsidian-sidecar update-check
 
 Before a version is published to the self-hosted channel, this returns
 `status: not-published`. Install an offline production candidate only from its
-verified release directory:
+verified release directory, following the
+[candidate upgrade and rollback procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback):
 
 ```sh
 cd release

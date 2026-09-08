@@ -4,6 +4,8 @@
 
 - A busy shared lease means **defer and retry**, not a failed capture. Queue
   attempts and the successful-backup clock must not advance on deferral.
+  A failed backup also leaves the checkpoint due for the next timer tick;
+  only a successful commit or a clean Git tree advances that clock.
 - Same-machine workers use an OS-held lock, released on process exit. Stop
   older workers before upgrading: a fresh legacy directory lock is respected,
   but mixed-version long-running workers must not overlap the installation.
@@ -16,7 +18,9 @@
 
 The Stop hook stays fast and always returns zero so it cannot interrupt Codex.
 When the transcript path is absent, only session/turn IDs, working directory,
-capture time, and local Codex-home routing metadata enter private state.
+capture time, and local Codex-home routing metadata enter private state,
+alongside fixed event/reason labels. Records are written atomically with mode
+`0600` in private capture directories.
 The worker searches `sessions` and `archived_sessions` beneath that home for an
 exact UUID filename and matching session metadata. Working directory must match
 when provided. Multiple matches, mismatches, and out-of-tree symlinks are rejected.
@@ -29,36 +33,76 @@ captures trigger `capture-incomplete`. Recovery failures are never called
 successfully processed. Older `capture-skips.log` entries lack session identity
 and cannot be automatically reconstructed from timestamps alone.
 
+Recovery runs during `process` and local timer ticks. Legacy queued events
+without a usable transcript path or timezone-aware capture timestamp move to
+`failed/` instead of being counted as processed. For retained failures, inspect
+only the routing metadata, correct the exact-session routing problem, and
+preserve the original capture time and audit record before retrying. Do not
+substitute the newest transcript or mark a queued recovery as completed
+curation. Normal retry handling is in [Operations](OPERATIONS.md#recovery).
+
+## Health And Alerts
+
 `worker-status.json` records the most recent timer result and the start of
 continuous deferral, without transcript content or exception messages. Errors,
 30-minute silence, and 30-minute continuous deferral are actionable. Repeated
-alerts use the existing cooldown. Unresolved capture failures and runtime
-problems cap doctor health at 79; use fresh `alert-status` alongside the periodic
-health report. A closed laptop will legitimately report a stale local worker
-until its next successful tick. The cloud-only role has no local-worker heartbeat.
+alerts use the existing cooldown. Stalled or failed captures, runtime problems,
+and indexing failures cap doctor health at 79; use fresh `alert-status` alongside
+the periodic health report. A closed laptop will legitimately report a stale
+local worker until its next successful tick. A missing status file is not itself
+reported as stale; confirm the service has run using the
+[platform checks](OPERATIONS.md#routine-checks).
 
-## Upgrade and rollback
+`cloud-maintenance-status.json` records cloud errors and continuous contention.
+A prior cloud failure remains visible through subsequent deferrals until a
+successful connected or offline-staged run clears it. Cloud maintenance does
+not use the local worker's silence threshold because it runs on a different
+schedule. Cloud-only deployments do not require a local-worker heartbeat.
+
+## Search Indexing
 
 Basic Memory 0.23 changed `status --wait` to an observation-only compatibility
-command. Sidecar detects that response and runs a synchronous search-only index
-pass instead of assuming the index is ready. Read-only inspection labels that
-API `observation-only`; `doctor` runs actual indexing and the live benchmark
-independently verifies retrieval. The Obsidian desktop CLI is optional on Linux.
+command. When its JSON response contains an `observed_files` list, Sidecar runs
+`reindex --project <configured-project> --search` synchronously instead of
+assuming the index is ready. This requests search indexing without embeddings.
+Read-only inspection labels that API `observation-only`; local `doctor` runs
+actual indexing, and the [live benchmark](TESTING.md#live-suite) independently
+verifies retrieval under the platform's integration requirements.
+
+`index-status.json` retains indexing state without exception messages. Failed
+indexing remains actionable even after the note and checkpoint were committed.
+The local worker retries indexing on an idle tick under its writer lease,
+without repeating curation or advancing the checkpoint. A failed full search
+rebuild retains full mode for its retry. `process` exits nonzero when indexing
+fails; `daemon-once` can exit zero after a handled failure, so inspect its result,
+worker status, and `alert-status` as well as the service exit code.
+
+## Upgrade And Rollback
+
+Keep the 0.6.4 candidate private. This procedure does not require a public tag,
+website publication, or release-index promotion.
 
 1. Capture package version, config, hooks, service state, queue counts, and vault
-   backup. Stop only the Sidecar timer while idle; leave Codex and sync running.
+   backup. Suspend only Sidecar scheduling and wait for active work to finish:
+   unload the idle launchd job on macOS, stop the user timer on Linux, and stop
+   both maintenance and reconnect timers on the cloud host. Leave Codex and
+   sync running; do not start manual writers during package replacement.
 2. Install the exact tested wheel on each host, preserving the prior wheel and
    config. A rolling upgrade is safe only with local writers kept idle during
    package replacement; no coordination schema migration is introduced.
-3. Use package-owned `setup` for config or service changes. Existing freshness
-   values are preserved. `setup --freshness-project-days 90` explicitly changes
-   the project review interval; without the flag a new install still defaults
-   to 30 days. It does not re-verify notes or rewrite existing freshness dates.
-4. Verify installation, run deterministic tests and the isolated live benchmark,
-   confirm actual Basic Memory retrieval, sync convergence, clean queues, current
-   backups, then observe more than one timer tick. Do not mistake an inactive
-   successful oneshot for a disabled timer.
-5. To roll back, wait for idle, stop the timer, reinstall the saved wheel and
-   restore only the backed-up config/service files changed by this upgrade.
+3. On local hosts, use package-owned `setup` for config or service changes;
+   review [freshness policy during setup](INSTALL.md#freshness-policy-during-setup).
+   Keep unrelated hooks and the current queue intact. Cloud deployment follows
+   [Cloud Sync](CLOUD_SYNC.md#update-the-cloud-runtime), preserving its cloud role.
+4. Resume the saved schedules using the [local worker reload](OPERATIONS.md#recovery)
+   when needed, then complete the [release checks](TESTING.md#release-checklist)
+   on local hosts and [cloud checks](CLOUD_SYNC.md#routine-checks) on the server.
+   Confirm actual Basic Memory retrieval locally, sync convergence, clean queues,
+   and current backups, then observe more than one timer tick. Do not mistake
+   an inactive successful oneshot for a disabled timer.
+5. To roll back, suspend the same schedules while idle, reinstall the saved
+   wheel, and restore only the backed-up config/service files changed by this upgrade.
    Retain capture recovery directories: older versions ignore them but they are
-   not disposable. Restart the timer and verify service and retrieval again.
+   not disposable. Preserve current queues and checkpoints rather than replacing
+   them with a pre-upgrade snapshot. Resume the saved schedules and verify
+   service and retrieval again.

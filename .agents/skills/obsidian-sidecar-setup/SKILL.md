@@ -24,7 +24,8 @@ files, or config when `obsidian-sidecar setup` can do so.
 7. Run `obsidian-sidecar verify-install`, then `obsidian-sidecar doctor`.
 8. In a fresh Codex session, have the user review and trust the Stop hook.
 9. Run `obsidian-sidecar benchmark` only after hook trust and live dependencies
-   are available. Require at least 80 and every critical gate.
+   are available. Require the
+   [acceptance standard](../../../docs/TESTING.md#acceptance-standard).
 
 ## Safety Rules
 

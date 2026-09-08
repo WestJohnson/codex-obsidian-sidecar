@@ -57,6 +57,9 @@ The command is read-only unless `--apply` is present. Optional switches:
 - `--model MODEL`
 - `--basic-memory-project NAME`
 
+For the project review interval override and preservation of existing policy,
+see [Freshness Policy During Setup](../../../../docs/INSTALL.md#freshness-policy-during-setup).
+
 Reject plans that require root, execute remote scripts, store secrets, or touch
 files outside the reported action list.
 
@@ -81,11 +84,10 @@ obsidian-sidecar benchmark
 ```
 
 `verify-install` checks structural integration. `doctor` checks vault health.
-`benchmark` is the live acceptance test and must score at least 80 with no
-critical failures. On macOS that includes the official Obsidian CLI and a clean
-launchd exit; on Linux it includes an enabled active user-systemd timer whose
-service last exited cleanly, and may skip Obsidian CLI search when the CLI is
-absent. Hook trust remains a deliberate human action in a fresh Codex session.
+`benchmark` must meet the
+[acceptance standard](../../../../docs/TESTING.md#acceptance-standard), including
+the [platform live checks](../../../../docs/TESTING.md#live-suite). Hook trust
+remains a deliberate human action in a fresh Codex session.
 
 For an existing managed vault upgrading to 0.4.0 or later, run the read-only
 `knowledge-migrate` plan, review its project and decision counts, and apply only

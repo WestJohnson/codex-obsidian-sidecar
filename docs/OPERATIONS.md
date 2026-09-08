@@ -3,8 +3,10 @@
 ## Runtime Topology
 
 1. Codex runs the trusted global `Stop` hook from `~/.codex/hooks.json`.
-2. The hook writes only event metadata to
-   `~/.local/share/codex-obsidian-sidecar/queue/` and always exits zero.
+2. The hook writes only event metadata to private state and always exits zero.
+   Routable events enter `~/.local/share/codex-obsidian-sidecar/queue/`; see
+   [incomplete captures](RUNTIME_RELIABILITY.md#incomplete-captures) for recovery
+   when routing information is missing.
 3. The configured `service_label` runs once per minute through the platform
    service manager (launchd on macOS, user-systemd on Linux) and waits for the
    configured debounce window.
@@ -32,9 +34,11 @@
    an exact source/task fingerprint match.
 10. A five-minute reconnect timer notices a returned peer and publishes a
     matching stage within the configured ten-minute rate limit.
-11. The local worker attempts a deduplicated desktop notification only for
-    failed curation events, Syncthing conflicts, persistent cloud failure
-    markers, or a staged report left unpublished for more than 24 hours.
+11. The local worker attempts a deduplicated desktop notification for failed
+    curation events, Syncthing conflicts, persistent cloud failure markers,
+    a staged report left unpublished for more than 24 hours, or the capture,
+    worker, and indexing problems defined in
+    [Runtime Reliability](RUNTIME_RELIABILITY.md#health-and-alerts).
     macOS delivery uses Notification Center through `osascript`; Linux delivery
     uses `notify-send`. If native notification delivery is unavailable or
     fails, the worker records the active alert and delivery error without
@@ -59,6 +63,12 @@ existing session can seed from its latest managed session note. Very large
 deltas are processed in bounded chunks and immediately requeued. Missing,
 stale, or corrupt checkpoints fall back to a bounded recovery packet instead
 of blocking capture.
+
+Queue groups share both a session ID and resolved transcript path. The latest
+arrival controls debounce; the latest valid capture timestamp controls the
+evidence cutoff, even if an older capture arrives later during recovery.
+Events are marked processed only when the committed cursor covers their own
+capture boundary. A Stop without a turn ID retains its distinct capture timestamp.
 
 If a curator still echoes too many retained items, the worker automatically
 discards only the oldest `c1`-only carry-forward entries until the output fits
@@ -96,13 +106,15 @@ ssh "$SIDECAR_CLOUD_HOST" 'runuser -u obsidian-sync -- /opt/obsidian-cloud/venv/
 Healthy results are:
 
 - doctor score at least 80, with zero critical failures;
-- benchmark score at least 80, with no failed critical gate;
+- benchmark meeting the [acceptance standard](TESTING.md#acceptance-standard);
 - background service clean on the host platform: launchd `last exit code = 0`
   on macOS, or an enabled active user-systemd timer whose service reports
   `Result=success`, `ExecMainStatus=0`, an `ExecMainCode` of `exited` or numeric
   `1` or `0`, and a real `ExecMainStartTimestamp` on Linux; all four service
   properties are required together;
 - no files in `~/.local/share/codex-obsidian-sidecar/failed/`.
+- no active capture, worker, or indexing problems in `alert-status`; see
+  [health and alerts](RUNTIME_RELIABILITY.md#health-and-alerts).
 - cloud benchmark score at least 80 with every critical gate passing.
 - no `/var/lib/obsidian-cloud/maintenance.failed` marker on the VPS.
 
@@ -173,26 +185,29 @@ Process a delayed queue immediately:
 obsidian-sidecar process --force
 ```
 
-Reload the worker:
+Reload the worker only after its current run is idle. On macOS, bootstrap
+starts the configured RunAtLoad job once; a subsequent forced kickstart can
+kill that worker mid-write and strand its lease.
 
 ```sh
 SIDECAR_CONFIG_PATH=~/.config/codex-obsidian-sidecar/config.json
 SIDECAR_SERVICE_LABEL="$(jq -r .service_label "$SIDECAR_CONFIG_PATH")"
 # macOS
 SIDECAR_PLIST_PATH=~/Library/LaunchAgents/"${SIDECAR_SERVICE_LABEL}.plist"
+launchctl enable "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 launchctl bootout "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 launchctl bootstrap "gui/$(id -u)" "$SIDECAR_PLIST_PATH"
-launchctl kickstart -k "gui/$(id -u)/$SIDECAR_SERVICE_LABEL"
 # Linux
 systemctl --user daemon-reload
 systemctl --user restart "${SIDECAR_SERVICE_LABEL}.timer"
 systemctl --user start --wait "${SIDECAR_SERVICE_LABEL}.service"
 ```
 
-Hook events without a usable transcript path are skipped before queueing, and
-legacy queued copies are consumed as non-errors. Other failed events retry
-three times, then move to the `failed` directory. Invalid model output is also
-written to `_System/Quarantine` without retained secrets. Before a retry, the
+For missing transcript paths and malformed legacy events, follow
+[incomplete capture recovery](RUNTIME_RELIABILITY.md#incomplete-captures).
+Curation failures retry up to three attempts, then move to the `failed`
+directory. Invalid model output is also written to `_System/Quarantine` without
+retained secrets. Before a retry, the
 worker checks whether a newer committed checkpoint cursor already covers that
 event's exact transcript boundary. Covered events move to `processed` with an
 auditable `superseded-by-checkpoint` disposition and are not curated again.
@@ -215,18 +230,10 @@ removing or overriding a persistent marker.
 
 ## Updating The Runtime
 
-Run the deterministic suite before installing a changed build:
-
-```sh
-cd ~/Documents/codex-obsidian-sidecar
-.venv/bin/pytest
-uv tool install --force --no-cache --python 3.13 .
-obsidian-sidecar benchmark
-```
-
-Use `--no-cache` during local development so `uv` cannot reuse an older wheel
-with the same version. After installation, kickstart the platform background
-service and confirm a clean exit before considering the update complete.
+Use the [update flow](UPDATES.md#user-flow) for published releases and the
+[candidate upgrade and rollback procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback)
+for this reliability update. The [release checklist](TESTING.md#release-checklist)
+defines required evidence.
 
 Cloud deployment, overnight task format, sync recovery, and backup restoration
 are documented in [Cloud Sync](CLOUD_SYNC.md).
