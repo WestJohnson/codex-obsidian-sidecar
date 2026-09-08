@@ -145,8 +145,8 @@ confirm publication. Retrying publication is not new acceptance evidence.
    [candidate upgrade procedure](RUNTIME_RELIABILITY.md#upgrade-and-rollback).
 5. Run the benchmark twice to detect state leakage and timing flakes.
 6. Run one real Codex turn and confirm `hook: Stop Completed`.
-7. Force-process the event and retrieve the note through Obsidian and Basic
-   Memory.
+7. Force-process the event and retrieve the note through the integrations
+   required by the [platform live checks](#live-suite).
 8. Run `doctor --backup` and require a score of at least 80 with zero critical
    failures.
 9. Observe the background service and require the
